@@ -18,12 +18,14 @@ from fastapi import FastAPI, WebSocket
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from starlette.websockets import WebSocketDisconnect
+from typing import cast
 
 from .config import AppConfig, load_config
 from .embedding import DinoEmbedder
 from .hand_detector import HandDetection, HandDetector
 from .logging_utils import UncertainEventLogger
-from .pose import PoseExtractor, compose_features, hand_normalize_3d, shoulder_normalize
+from .perf import FrameProfiler, PerfAggregator
+from .pose import PoseExtractor, PosePipelineWorker, PoseWorkerResult, compose_features, hand_normalize_3d, shoulder_normalize
 from .pose.datatypes import PoseFrame, PoseLandmarksGroup
 from .pose_words import PoseWordOnnxModel, resample_to_fixed_T
 from .retrieval import GalleryIndex, RetrievalHit
@@ -346,10 +348,23 @@ class SessionProcessor:
         self.pose_word_metrics: WordRuntimeMetrics = WordRuntimeMetrics()
         self.pose_no_event_index: int | None = None
         self.pose_init_error: str | None = None
+        self.pose_worker: PosePipelineWorker | None = None
+        self.pose_last_worker_frame_id: int = -1
+        self.pose_cached_worker_result: PoseWorkerResult | None = None
+        self.pose_last_payload: dict[str, Any] | None = None
+        self.pose_last_ws_send_ms: float = 0.0
+        self.pose_seen_segment_keys: deque[tuple[int, int]] = deque(maxlen=512)
+        self.pose_seen_segment_keys_set: set[tuple[int, int]] = set()
         self.pose_in_timestamps_ms: deque[int] = deque(maxlen=180)
         self.pose_out_timestamps_ms: deque[int] = deque(maxlen=180)
         self.pose_process_ms_ema: float = 0.0
         self.pose_last_segment_event: dict[str, Any] | None = None
+        perf_window_size = max(10, int(getattr(cfg, "perf_window_size", 180)))
+        perf_ema_alpha = float(getattr(cfg, "perf_ema_alpha", 0.25))
+        self.pose_perf = PerfAggregator(
+            window_size=perf_window_size,
+            ema_alpha=perf_ema_alpha,
+        )
         if self.recognition_mode == "words":
             model = runtime.get_word_model()
             if model is None:
@@ -419,6 +434,26 @@ class SessionProcessor:
                 )
                 self.pose_no_event_index = self.pose_word_model.find_no_event_index(cfg.pose_word_no_event_label)
 
+        if self.recognition_mode == "pose_words" and bool(getattr(cfg, "pose_worker_enabled", True)):
+            extractor = runtime.get_pose_extractor()
+            if extractor is None:
+                if self.pose_init_error is None:
+                    self.pose_init_error = runtime.errors.get("pose_extractor", "pose extractor is unavailable")
+            else:
+                self.pose_worker = PosePipelineWorker(
+                    extractor=extractor,
+                    use_shoulder_norm=bool(cfg.use_shoulder_norm),
+                    use_hands_3d_norm=bool(cfg.use_hands_3d_norm),
+                    queue_size=int(getattr(cfg, "pose_worker_queue_size", 4)),
+                    output_size=int(getattr(cfg, "pose_worker_output_size", 4)),
+                    perf_enabled=bool(getattr(cfg, "perf_enabled", False)),
+                    perf_aggregator=PerfAggregator(
+                        window_size=perf_window_size,
+                        ema_alpha=perf_ema_alpha,
+                    ),
+                )
+                self.pose_worker.start()
+
         self.cached_vlm_candidate_key: str | None = None
         self.cached_vlm_result: JudgeResult | None = None
         self.last_vlm_call_ms: int = 0
@@ -437,6 +472,27 @@ class SessionProcessor:
             self.words_service.clear_text()
         if self.pose_word_decoder is not None:
             self.pose_word_decoder.clear_text()
+            self.pose_seen_segment_keys.clear()
+            self.pose_seen_segment_keys_set.clear()
+
+    def close(self) -> None:
+        if self.pose_worker is not None:
+            self.pose_worker.stop(timeout_sec=0.5)
+            self.pose_worker = None
+
+    def uses_pose_worker(self) -> bool:
+        return self.recognition_mode == "pose_words" and self.pose_worker is not None
+
+    def enqueue_pose_frame(self, frame_bgr: np.ndarray, now_ms: int, *, decode_jpeg_ms: float | None = None) -> None:
+        if self.pose_worker is None:
+            return
+        self.pose_worker.submit_frame(frame_bgr, now_ms, decode_jpeg_ms=decode_jpeg_ms)
+
+    def process_pose_latest(self, now_ms: int) -> dict[str, Any]:
+        return self._process_pose_words(None, now_ms, worker_only=True)
+
+    def set_last_ws_send_ms(self, value_ms: float) -> None:
+        self.pose_last_ws_send_ms = float(max(0.0, float(value_ms)))
 
     @staticmethod
     def _copy_landmarks_group(group: PoseLandmarksGroup | None) -> PoseLandmarksGroup | None:
@@ -444,6 +500,48 @@ class SessionProcessor:
             return None
         conf = None if group.confidence is None else group.confidence.copy()
         return PoseLandmarksGroup(points=group.points.copy(), confidence=conf)
+
+    def _extract_pose_sync(
+        self,
+        frame_bgr: np.ndarray,
+        profiler: FrameProfiler,
+    ) -> tuple[PoseFrame | None, PoseFrame | None, np.ndarray | None, bool, str | None]:
+        extractor = self.runtime.get_pose_extractor()
+        if extractor is None:
+            return (
+                None,
+                None,
+                None,
+                False,
+                self.runtime.errors.get("pose_extractor", "pose extractor is unavailable"),
+            )
+
+        if cv2 is not None:
+            frame_rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
+        else:
+            frame_rgb = frame_bgr[:, :, ::-1]
+
+        try:
+            with profiler.stage("mediapipe_ms"):
+                pose_frame = extractor.process(frame_rgb)
+        except Exception as exc:
+            return None, None, None, False, f"pose extraction error: {exc}"
+
+        if pose_frame is None:
+            return None, None, None, False, None
+
+        with profiler.stage("normalize_ms"):
+            norm_frame = self._normalize_pose_frame(pose_frame)
+        hand_present = bool(norm_frame.left_hand is not None or norm_frame.right_hand is not None)
+        with profiler.stage("feature_ms"):
+            feature_vec, _ = compose_features(
+                norm_frame,
+                apply_shoulder_norm=False,
+                hide_legs_before_body=True,
+                canonical_hands_3d=False,
+            )
+            feature_vec = np.asarray(feature_vec, dtype=np.float32).reshape(-1)
+        return pose_frame, norm_frame, feature_vec, hand_present, None
 
     @classmethod
     def _copy_pose_frame(cls, frame: PoseFrame) -> PoseFrame:
@@ -515,6 +613,15 @@ class SessionProcessor:
         dt_ms = max(1, last - first)
         return float((len(timestamps_ms) - 1) * 1000.0 / dt_ms)
 
+    def _remember_pose_segment_key(self, key: tuple[int, int]) -> None:
+        if key in self.pose_seen_segment_keys_set:
+            return
+        if len(self.pose_seen_segment_keys) >= self.pose_seen_segment_keys.maxlen:
+            old = self.pose_seen_segment_keys.popleft()
+            self.pose_seen_segment_keys_set.discard(old)
+        self.pose_seen_segment_keys.append(key)
+        self.pose_seen_segment_keys_set.add(key)
+
     def _current_bio_payload(self, cfg: AppConfig, bio_debug: dict[str, Any] | None = None) -> dict[str, Any]:
         cfg_th_b = float(getattr(cfg, "segmentation_sign_th_b", 0.5))
         cfg_th_o = float(getattr(cfg, "segmentation_sign_th_o", 0.5))
@@ -543,6 +650,7 @@ class SessionProcessor:
         payload: dict[str, Any],
         now_ms: int,
         started_s: float,
+        stage_values_ms: dict[str, float] | None = None,
         bio_debug: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         cfg = self.runtime.config
@@ -559,15 +667,24 @@ class SessionProcessor:
         fps_total = self._compute_fps(self.pose_out_timestamps_ms)
         fps_pose = float(1000.0 / self.pose_process_ms_ema) if self.pose_process_ms_ema > 1e-6 else 0.0
 
-        payload["perf"] = {
-            "latency_ms": float(latency_ms),
-            "fps_in": float(fps_in),
-            "fps_pose": float(fps_pose),
-            "fps_total": float(fps_total),
-        }
+        stage_values = dict(stage_values_ms or {})
+        stage_values["total_ms"] = float(process_ms)
+        if bool(getattr(cfg, "perf_enabled", False)):
+            self.pose_perf.update(stage_values)
+            perf_payload: dict[str, Any] = {
+                "latency_ms": float(latency_ms),
+                "fps_in": float(fps_in),
+                "fps_pose": float(fps_pose),
+                "fps_total": float(fps_total),
+                "dropped_frames_count": int(self.pose_worker.dropped_frames_count) if self.pose_worker is not None else 0,
+                "worker_processed_frames": int(self.pose_worker.processed_frames) if self.pose_worker is not None else 0,
+            }
+            perf_payload.update(self.pose_perf.snapshot_flat())
+            payload["perf"] = perf_payload
         payload["bio"] = self._current_bio_payload(cfg, bio_debug=bio_debug)
         if self.pose_last_segment_event is not None:
             payload["segment_event"] = dict(self.pose_last_segment_event)
+        self.pose_last_payload = dict(payload)
         return payload
 
     def _none_pose_message(
@@ -625,44 +742,189 @@ class SessionProcessor:
             payload["error"] = error
         return payload
 
-    def _process_pose_words(self, frame_bgr: np.ndarray, now_ms: int) -> dict[str, Any]:
+    def _process_pose_words(
+        self,
+        frame_bgr: np.ndarray | None,
+        now_ms: int,
+        *,
+        decode_jpeg_ms: float | None = None,
+        worker_only: bool = False,
+    ) -> dict[str, Any]:
         cfg = self.runtime.config
         started_s = time.perf_counter()
         self.pose_in_timestamps_ms.append(int(now_ms))
-        extractor = self.runtime.get_pose_extractor()
-        if extractor is None:
-            return self._finalize_pose_payload(
-                payload=self._none_pose_message(
-                now_ms=now_ms,
-                error=self.runtime.errors.get("pose_extractor", "pose extractor is unavailable"),
-                ),
-                now_ms=now_ms,
-                started_s=started_s,
-            )
+        profiler = FrameProfiler(self.pose_perf, enabled=bool(getattr(cfg, "perf_enabled", False)))
+        profiler.record("decode_jpeg_ms", decode_jpeg_ms)
+        profiler.record("ws_send_ms", self.pose_last_ws_send_ms)
 
-        if cv2 is not None:
-            frame_rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
+        pose_frame: PoseFrame | None = None
+        norm_frame: PoseFrame | None = None
+        feature_vec: np.ndarray | None = None
+        hand_present = False
+        worker_result: PoseWorkerResult | None = None
+
+        if self.pose_worker is not None:
+            if frame_bgr is not None and not worker_only:
+                self.pose_worker.submit_frame(frame_bgr, now_ms, decode_jpeg_ms=decode_jpeg_ms)
+            latest_result = self.pose_worker.get_latest_result()
+            if latest_result is not None:
+                self.pose_cached_worker_result = latest_result
+            worker_result = self.pose_cached_worker_result
+            if worker_result is None:
+                if frame_bgr is not None and not worker_only:
+                    pose_frame, norm_frame, feature_vec, hand_present, sync_error = self._extract_pose_sync(
+                        frame_bgr,
+                        profiler,
+                    )
+                    if sync_error is not None:
+                        stage_values = profiler.finish()
+                        return self._finalize_pose_payload(
+                            payload=self._none_pose_message(now_ms=now_ms, error=sync_error),
+                            now_ms=now_ms,
+                            started_s=started_s,
+                            stage_values_ms=stage_values,
+                        )
+                else:
+                    stage_values = profiler.finish()
+                    return self._finalize_pose_payload(
+                        payload=self._none_pose_message(
+                            now_ms=now_ms,
+                            error="pose worker warming up",
+                        ),
+                        now_ms=now_ms,
+                        started_s=started_s,
+                        stage_values_ms=stage_values,
+                    )
+            elif int(worker_result.frame_id) <= self.pose_last_worker_frame_id:
+                if frame_bgr is not None and not worker_only:
+                    pose_frame, norm_frame, feature_vec, hand_present, sync_error = self._extract_pose_sync(
+                        frame_bgr,
+                        profiler,
+                    )
+                    if sync_error is not None:
+                        stage_values = profiler.finish()
+                        return self._finalize_pose_payload(
+                            payload=self._none_pose_message(now_ms=now_ms, error=sync_error),
+                            now_ms=now_ms,
+                            started_s=started_s,
+                            stage_values_ms=stage_values,
+                        )
+                elif self.pose_last_payload is not None:
+                    cached_payload = dict(self.pose_last_payload)
+                    cached_payload["timestamp_ms"] = int(now_ms)
+                    stage_values = profiler.finish()
+                    return self._finalize_pose_payload(
+                        payload=cached_payload,
+                        now_ms=now_ms,
+                        started_s=started_s,
+                        stage_values_ms=stage_values,
+                    )
+                else:
+                    stage_values = profiler.finish()
+                    return self._finalize_pose_payload(
+                        payload=self._none_pose_message(now_ms=now_ms, error="pose worker has no new frame yet"),
+                        now_ms=now_ms,
+                        started_s=started_s,
+                        stage_values_ms=stage_values,
+                    )
+            else:
+                if worker_result.timings_ms:
+                    for name, value in worker_result.timings_ms.items():
+                        profiler.record(name, value)
+                if worker_result.error:
+                    stage_values = profiler.finish()
+                    return self._finalize_pose_payload(
+                        payload=self._none_pose_message(
+                            now_ms=now_ms,
+                            error=f"pose worker error: {worker_result.error}",
+                        ),
+                        now_ms=now_ms,
+                        started_s=started_s,
+                        stage_values_ms=stage_values,
+                    )
+                pose_frame = worker_result.pose_frame
+                norm_frame = worker_result.norm_frame
+                feature_vec = worker_result.feature_vec
+                hand_present = bool(worker_result.hand_present)
+                self.pose_last_worker_frame_id = int(worker_result.frame_id)
+
+            if pose_frame is None and frame_bgr is not None and not worker_only:
+                pose_frame, norm_frame, feature_vec, hand_present, sync_error = self._extract_pose_sync(
+                    frame_bgr,
+                    profiler,
+                )
+                if sync_error is not None:
+                    stage_values = profiler.finish()
+                    return self._finalize_pose_payload(
+                        payload=self._none_pose_message(now_ms=now_ms, error=sync_error),
+                        now_ms=now_ms,
+                        started_s=started_s,
+                        stage_values_ms=stage_values,
+                    )
+
+            if pose_frame is None:
+                stage_values = profiler.finish()
+                return self._finalize_pose_payload(
+                    payload=self._none_pose_message(
+                        now_ms=now_ms,
+                        error="pose worker warming up",
+                    ),
+                    now_ms=now_ms,
+                    started_s=started_s,
+                    stage_values_ms=stage_values,
+                )
         else:
-            frame_rgb = frame_bgr[:, :, ::-1]
+            if worker_only:
+                stage_values = profiler.finish()
+                return self._finalize_pose_payload(
+                    payload=self._none_pose_message(now_ms=now_ms, error="pose worker is disabled"),
+                    now_ms=now_ms,
+                    started_s=started_s,
+                    stage_values_ms=stage_values,
+                )
+            if frame_bgr is None:
+                stage_values = profiler.finish()
+                return self._finalize_pose_payload(
+                    payload=self._none_pose_message(now_ms=now_ms, error="empty frame"),
+                    now_ms=now_ms,
+                    started_s=started_s,
+                    stage_values_ms=stage_values,
+                )
 
-        try:
-            pose_frame = extractor.process(frame_rgb)
-        except Exception as exc:
-            return self._finalize_pose_payload(
-                payload=self._none_pose_message(now_ms=now_ms, error=f"pose extraction error: {exc}"),
-                now_ms=now_ms,
-                started_s=started_s,
-            )
+            pose_frame, norm_frame, feature_vec, hand_present, sync_error = self._extract_pose_sync(frame_bgr, profiler)
+            if sync_error is not None:
+                stage_values = profiler.finish()
+                return self._finalize_pose_payload(
+                    payload=self._none_pose_message(now_ms=now_ms, error=sync_error),
+                    now_ms=now_ms,
+                    started_s=started_s,
+                    stage_values_ms=stage_values,
+                )
 
         if pose_frame is None:
+            stage_values = profiler.finish()
             return self._finalize_pose_payload(
                 payload=self._none_pose_message(now_ms=now_ms),
                 now_ms=now_ms,
                 started_s=started_s,
+                stage_values_ms=stage_values,
             )
 
-        norm_frame = self._normalize_pose_frame(pose_frame)
-        hand_present = bool(norm_frame.left_hand is not None or norm_frame.right_hand is not None)
+        if norm_frame is None:
+            with profiler.stage("normalize_ms"):
+                norm_frame = self._normalize_pose_frame(pose_frame)
+            hand_present = bool(norm_frame.left_hand is not None or norm_frame.right_hand is not None)
+
+        if feature_vec is None:
+            with profiler.stage("feature_ms"):
+                feature_vec, _ = compose_features(
+                    norm_frame,
+                    apply_shoulder_norm=False,
+                    hide_legs_before_body=True,
+                    canonical_hands_3d=False,
+                )
+                feature_vec = np.asarray(feature_vec, dtype=np.float32).reshape(-1)
+
         skeleton_raw = self._frame_to_skeleton_payload(pose_frame)
         skeleton_norm = self._frame_to_skeleton_payload(norm_frame)
 
@@ -690,42 +952,46 @@ class SessionProcessor:
             )
             payload["timestamp_ms"] = int(now_ms)
             payload["skeleton"] = {"raw": skeleton_raw, "norm": skeleton_norm}
-            return self._finalize_pose_payload(payload=payload, now_ms=now_ms, started_s=started_s)
-
-        if self.pose_segmenter is None or self.pose_word_model is None or self.pose_word_decoder is None:
+            stage_values = profiler.finish()
             return self._finalize_pose_payload(
-                payload=self._none_pose_message(
-                now_ms=now_ms,
-                error=self.pose_init_error or "pose_words segmentation runtime is unavailable",
-                hand_present=hand_present,
-                skeleton_raw=skeleton_raw,
-                skeleton_norm=skeleton_norm,
-                ),
+                payload=payload,
                 now_ms=now_ms,
                 started_s=started_s,
+                stage_values_ms=stage_values,
             )
 
-        feature_vec, _ = compose_features(
-            norm_frame,
-            apply_shoulder_norm=False,
-            hide_legs_before_body=True,
-            canonical_hands_3d=False,
-        )
-        feature_vec = np.asarray(feature_vec, dtype=np.float32).reshape(-1)
-
-        try:
-            segment_result = self.pose_segmenter.update(feature_vec)
-        except Exception as exc:
+        if self.pose_segmenter is None or self.pose_word_model is None or self.pose_word_decoder is None:
+            stage_values = profiler.finish()
             return self._finalize_pose_payload(
                 payload=self._none_pose_message(
-                now_ms=now_ms,
-                error=f"segmentation error: {exc}",
-                hand_present=hand_present,
-                skeleton_raw=skeleton_raw,
-                skeleton_norm=skeleton_norm,
+                    now_ms=now_ms,
+                    error=self.pose_init_error or "pose_words segmentation runtime is unavailable",
+                    hand_present=hand_present,
+                    skeleton_raw=skeleton_raw,
+                    skeleton_norm=skeleton_norm,
                 ),
                 now_ms=now_ms,
                 started_s=started_s,
+                stage_values_ms=stage_values,
+            )
+
+        try:
+            segment_result = self.pose_segmenter.update(cast(np.ndarray, feature_vec))
+            profiler.record("bio_infer_ms", segment_result.latency_ms)
+            profiler.record("bio_decode_ms", segment_result.decode_latency_ms)
+        except Exception as exc:
+            stage_values = profiler.finish()
+            return self._finalize_pose_payload(
+                payload=self._none_pose_message(
+                    now_ms=now_ms,
+                    error=f"segmentation error: {exc}",
+                    hand_present=hand_present,
+                    skeleton_raw=skeleton_raw,
+                    skeleton_norm=skeleton_norm,
+                ),
+                now_ms=now_ms,
+                started_s=started_s,
+                stage_values_ms=stage_values,
             )
 
         segments_payload = {
@@ -752,6 +1018,7 @@ class SessionProcessor:
             "active_phrase": bool(segment_result.active_phrase),
             "active_sign_progress": float(segment_result.active_sign_progress),
             "active_phrase_progress": float(segment_result.active_phrase_progress),
+            "dropped_frames_count": int(worker_result.dropped_frames_count) if worker_result is not None else 0,
         }
         if segment_result.sign_segments:
             latest_seg = segment_result.sign_segments[-1]
@@ -797,57 +1064,80 @@ class SessionProcessor:
                 payload["skeleton"] = {"raw": skeleton_raw, "norm": skeleton_norm}
                 payload["segments"] = segments_payload
                 payload.setdefault("debug", {})["bio"] = bio_debug
-                return self._finalize_pose_payload(payload=payload, now_ms=now_ms, started_s=started_s, bio_debug=bio_debug)
+                stage_values = profiler.finish()
+                return self._finalize_pose_payload(
+                    payload=payload,
+                    now_ms=now_ms,
+                    started_s=started_s,
+                    stage_values_ms=stage_values,
+                    bio_debug=bio_debug,
+                )
 
+            stage_values = profiler.finish()
             return self._finalize_pose_payload(
                 payload=self._none_pose_message(
-                now_ms=now_ms,
-                hand_present=hand_present,
-                skeleton_raw=skeleton_raw,
-                skeleton_norm=skeleton_norm,
-                segments=segments_payload,
-                bio_debug=bio_debug,
+                    now_ms=now_ms,
+                    hand_present=hand_present,
+                    skeleton_raw=skeleton_raw,
+                    skeleton_norm=skeleton_norm,
+                    segments=segments_payload,
+                    bio_debug=bio_debug,
                 ),
                 now_ms=now_ms,
                 started_s=started_s,
+                stage_values_ms=stage_values,
                 bio_debug=bio_debug,
             )
 
         decoded = None
         topk_pairs: list[tuple[str, float]] = []
         total_latency_ms = float(segment_result.latency_ms or 0.0)
+        word_infer_total_ms = 0.0
+        decoder_total_ms = 0.0
 
         if segment_result.latency_ms is not None:
             self.pose_word_metrics.record_inference(float(segment_result.latency_ms))
 
         for seg in segment_result.sign_segments:
+            seg_key = (int(seg.start), int(seg.end))
+            if seg_key in self.pose_seen_segment_keys_set:
+                continue
+            self._remember_pose_segment_key(seg_key)
             seg_feats = self.pose_segmenter.get_feature_span(seg.start, seg.end)
             if seg_feats is None or seg_feats.shape[0] == 0:
                 continue
             clip = resample_to_fixed_T(seg_feats, T=cfg.pose_word_clip_frames, method="linear")
             probs, cls_latency = self.pose_word_model.infer_probs(clip)
+            word_infer_total_ms += float(cls_latency)
             total_latency_ms += float(cls_latency)
             self.pose_word_metrics.record_inference(float(cls_latency))
+            decode_started = time.perf_counter()
             decoded = self.pose_word_decoder.update(
                 probs=probs,
                 labels=self.pose_word_model.labels,
                 topk=cfg.pose_word_topk,
                 no_event_index=self.pose_no_event_index,
             )
+            decoder_total_ms += float((time.perf_counter() - decode_started) * 1000.0)
             topk_pairs = [(self.pose_word_model.labels[i], float(probs[i])) for i in decoded.topk_indices]
 
+        profiler.record("word_infer_ms", word_infer_total_ms)
+        profiler.record("decoder_ms", decoder_total_ms)
+
         if decoded is None:
+            stage_values = profiler.finish()
             return self._finalize_pose_payload(
                 payload=self._none_pose_message(
-                now_ms=now_ms,
-                hand_present=hand_present,
-                skeleton_raw=skeleton_raw,
-                skeleton_norm=skeleton_norm,
-                segments=segments_payload,
-                bio_debug=bio_debug,
+                    now_ms=now_ms,
+                    hand_present=hand_present,
+                    skeleton_raw=skeleton_raw,
+                    skeleton_norm=skeleton_norm,
+                    segments=segments_payload,
+                    bio_debug=bio_debug,
                 ),
                 now_ms=now_ms,
                 started_s=started_s,
+                stage_values_ms=stage_values,
                 bio_debug=bio_debug,
             )
 
@@ -901,7 +1191,14 @@ class SessionProcessor:
             "hold_progress": float(decoded.hold_progress),
             "cooldown_left_segments": int(decoded.cooldown_left),
         }
-        return self._finalize_pose_payload(payload=payload, now_ms=now_ms, started_s=started_s, bio_debug=bio_debug)
+        stage_values = profiler.finish()
+        return self._finalize_pose_payload(
+            payload=payload,
+            now_ms=now_ms,
+            started_s=started_s,
+            stage_values_ms=stage_values,
+            bio_debug=bio_debug,
+        )
 
     def _none_words_message(self, *, now_ms: int, error: str = "", hand_present: bool = False) -> dict[str, Any]:
         text_value = ""
@@ -1079,10 +1376,16 @@ class SessionProcessor:
         self.last_vlm_call_ms = now_ms
         return True
 
-    def process_frame(self, frame_bgr: np.ndarray, now_ms: int) -> dict[str, Any]:
+    def process_frame(
+        self,
+        frame_bgr: np.ndarray,
+        now_ms: int,
+        *,
+        decode_jpeg_ms: float | None = None,
+    ) -> dict[str, Any]:
         cfg = self.runtime.config
         if self.recognition_mode == "pose_words":
-            return self._process_pose_words(frame_bgr, now_ms)
+            return self._process_pose_words(frame_bgr, now_ms, decode_jpeg_ms=decode_jpeg_ms)
 
         if self.recognition_mode == "words":
             if self.words_service is None:
@@ -1472,55 +1775,70 @@ def gallery_inspector() -> HTMLResponse:
 async def ws_stream(websocket: WebSocket) -> None:
     await websocket.accept()
     session = SessionProcessor(runtime)
-
-    while True:
-        try:
-            packet = await websocket.receive()
-        except WebSocketDisconnect:
-            break
-        except Exception:
-            break
-
-        if packet["type"] == "websocket.disconnect":
-            break
-
-        if packet.get("text") is not None:
+    try:
+        while True:
             try:
-                data = json.loads(packet["text"])
-            except json.JSONDecodeError:
+                packet = await websocket.receive()
+            except WebSocketDisconnect:
+                break
+            except Exception:
+                break
+
+            if packet["type"] == "websocket.disconnect":
+                break
+
+            if packet.get("text") is not None:
+                try:
+                    data = json.loads(packet["text"])
+                except json.JSONDecodeError:
+                    continue
+
+                if data.get("type") == "control" and data.get("action") == "clear_text":
+                    session.clear_text()
+                    await websocket.send_json({"type": "ack", "action": "clear_text"})
                 continue
 
-            if data.get("type") == "control" and data.get("action") == "clear_text":
-                session.clear_text()
-                await websocket.send_json({"type": "ack", "action": "clear_text"})
-            continue
+            frame_bytes = packet.get("bytes")
+            if not frame_bytes:
+                continue
 
-        frame_bytes = packet.get("bytes")
-        if not frame_bytes:
-            continue
+            if cv2 is None:
+                await websocket.send_json(
+                    {
+                        "status": "NONE",
+                        "letter": "NONE",
+                        "error": "opencv-python is not installed",
+                    }
+                )
+                continue
 
-        if cv2 is None:
-            await websocket.send_json(
-                {
-                    "status": "NONE",
-                    "letter": "NONE",
-                    "error": "opencv-python is not installed",
-                }
-            )
-            continue
+            decode_started = time.perf_counter()
+            np_buf = np.frombuffer(frame_bytes, dtype=np.uint8)
+            frame_bgr = cv2.imdecode(np_buf, cv2.IMREAD_COLOR)
+            decode_jpeg_ms = float((time.perf_counter() - decode_started) * 1000.0)
+            if frame_bgr is None:
+                continue
 
-        np_buf = np.frombuffer(frame_bytes, dtype=np.uint8)
-        frame_bgr = cv2.imdecode(np_buf, cv2.IMREAD_COLOR)
-        if frame_bgr is None:
-            continue
-
-        now_ms = int(time.monotonic() * 1000)
-        payload = await asyncio.to_thread(session.process_frame, frame_bgr, now_ms)
-        try:
-            await websocket.send_json(payload)
-        except WebSocketDisconnect:
-            break
-        except RuntimeError:
-            break
-        except Exception:
-            break
+            now_ms = int(time.monotonic() * 1000)
+            if session.uses_pose_worker():
+                session.enqueue_pose_frame(frame_bgr, now_ms, decode_jpeg_ms=decode_jpeg_ms)
+                payload = await asyncio.to_thread(session.process_pose_latest, now_ms)
+            else:
+                payload = await asyncio.to_thread(
+                    session.process_frame,
+                    frame_bgr,
+                    now_ms,
+                    decode_jpeg_ms=decode_jpeg_ms,
+                )
+            send_started = time.perf_counter()
+            try:
+                await websocket.send_json(payload)
+                session.set_last_ws_send_ms((time.perf_counter() - send_started) * 1000.0)
+            except WebSocketDisconnect:
+                break
+            except RuntimeError:
+                break
+            except Exception:
+                break
+    finally:
+        session.close()

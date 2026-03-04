@@ -33,6 +33,7 @@ class FrameSummary:
     fps_in: float | None
     fps_pose: float | None
     fps_total: float | None
+    dropped_frames_count: int | None
     sign_segments: int
     phrase_segments: int
     committed: bool
@@ -179,6 +180,9 @@ def parse_frame_summary(payload: dict[str, Any]) -> FrameSummary:
         fps_in=float(perf.get("fps_in")) if isinstance(perf.get("fps_in"), (int, float)) else None,
         fps_pose=float(perf.get("fps_pose")) if isinstance(perf.get("fps_pose"), (int, float)) else None,
         fps_total=float(perf.get("fps_total")) if isinstance(perf.get("fps_total"), (int, float)) else None,
+        dropped_frames_count=int(perf.get("dropped_frames_count"))
+        if isinstance(perf.get("dropped_frames_count"), (int, float))
+        else None,
         sign_segments=len(sign_segments),
         phrase_segments=len(phrase_segments),
         committed=bool(payload.get("text_state", {}).get("committed", False))
@@ -230,6 +234,7 @@ async def run_smoke(args: argparse.Namespace) -> int:
     segment_events: set[tuple[int, int, int]] = set()
     sign_segments_total = 0
     phrase_segments_total = 0
+    dropped_frames_max = 0
     received = 0
     sent = 0
 
@@ -267,6 +272,8 @@ async def run_smoke(args: argparse.Namespace) -> int:
 
                     sign_segments_total += int(summary.sign_segments)
                     phrase_segments_total += int(summary.phrase_segments)
+                    if summary.dropped_frames_count is not None:
+                        dropped_frames_max = max(dropped_frames_max, int(summary.dropped_frames_count))
 
                     seg_event = payload.get("segment_event") if isinstance(payload.get("segment_event"), dict) else None
                     if seg_event is not None:
@@ -311,6 +318,7 @@ async def run_smoke(args: argparse.Namespace) -> int:
     print("[smoke] unique_segment_events:", len(segment_events))
     print("[smoke] sign_segments_total:", sign_segments_total)
     print("[smoke] phrase_segments_total:", phrase_segments_total)
+    print("[smoke] dropped_frames_max:", dropped_frames_max)
     print("[smoke] log_path:", log_path)
 
     if received == 0:

@@ -12,6 +12,12 @@ class AppConfig:
     recognition_mode: str = "letters"
     use_shoulder_norm: bool = True
     use_hands_3d_norm: bool = False
+    perf_enabled: bool = False
+    perf_window_size: int = 120
+    perf_ema_alpha: float = 0.2
+    pose_worker_enabled: bool = True
+    pose_worker_queue_size: int = 3
+    pose_worker_output_size: int = 4
     segmentation_enabled: bool = False
     segmentation_model_path: str = "backend/artifacts/bio_segmenter.onnx"
     segmentation_thresholds_path: str = "backend/artifacts/bio_thresholds.json"
@@ -177,6 +183,22 @@ class AppConfig:
                 },
             ),
             (
+                "perf",
+                {
+                    "enabled": "perf_enabled",
+                    "window_size": "perf_window_size",
+                    "ema_alpha": "perf_ema_alpha",
+                },
+            ),
+            (
+                "pose_worker",
+                {
+                    "enabled": "pose_worker_enabled",
+                    "queue_size": "pose_worker_queue_size",
+                    "output_size": "pose_worker_output_size",
+                },
+            ),
+            (
                 "pose_word_model",
                 {
                     "path": "pose_word_model_path",
@@ -225,6 +247,10 @@ class AppConfig:
         if cfg.recognition_mode not in {"letters", "words", "pose_words"}:
             cfg.recognition_mode = "letters"
         cfg.letters_allowlist = cfg.letters_allowlist or []
+        cfg.perf_window_size = max(10, int(cfg.perf_window_size))
+        cfg.perf_ema_alpha = min(1.0, max(0.01, float(cfg.perf_ema_alpha)))
+        cfg.pose_worker_queue_size = max(1, int(cfg.pose_worker_queue_size))
+        cfg.pose_worker_output_size = max(1, int(cfg.pose_worker_output_size))
         cfg.segmentation_window = max(8, int(cfg.segmentation_window))
         cfg.segmentation_step = max(1, int(cfg.segmentation_step))
         cfg.segmentation_min_len = max(1, int(cfg.segmentation_min_len))

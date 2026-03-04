@@ -1,6 +1,14 @@
 recognition_mode: pose_words
 use_shoulder_norm: true
 use_hands_3d_norm: false
+perf:
+  enabled: false
+  window_size: 120
+  ema_alpha: 0.2
+pose_worker:
+  enabled: true
+  queue_size: 3
+  output_size: 4
 frontend_fps: 8
 jpeg_quality: 0.75
 hold_ms: 700

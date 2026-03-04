@@ -117,3 +117,28 @@ pose_word_commit_logic:
     assert cfg.pose_word_hold_segments == 3
     assert cfg.pose_word_cooldown_segments == 4
     assert cfg.pose_word_dedup_same_word is False
+
+
+def test_perf_and_worker_parsing(tmp_path: Path) -> None:
+    path = tmp_path / "config.yaml"
+    path.write_text(
+        """
+recognition_mode: pose_words
+perf:
+  enabled: true
+  window_size: 180
+  ema_alpha: 0.35
+pose_worker:
+  enabled: true
+  queue_size: 5
+  output_size: 7
+""".strip(),
+        encoding="utf-8",
+    )
+    cfg = load_config(path)
+    assert cfg.perf_enabled is True
+    assert cfg.perf_window_size == 180
+    assert cfg.perf_ema_alpha == 0.35
+    assert cfg.pose_worker_enabled is True
+    assert cfg.pose_worker_queue_size == 5
+    assert cfg.pose_worker_output_size == 7

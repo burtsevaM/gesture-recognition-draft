@@ -1,5 +1,6 @@
 from .datatypes import PoseFrame, PoseLandmarksGroup, validate_pose_frame
 from .extractor import PoseExtractor, PoseExtractorConfig
+from .pipeline_worker import PosePipelineWorker, PoseWorkerInput, PoseWorkerResult
 from .normalization import (
     DEFAULT_UPPER_BODY_INDICES,
     POSE_LEG_INDICES,
@@ -14,6 +15,9 @@ from .normalization import (
 __all__ = [
     "PoseExtractor",
     "PoseExtractorConfig",
+    "PosePipelineWorker",
+    "PoseWorkerInput",
+    "PoseWorkerResult",
     "PoseFrame",
     "PoseLandmarksGroup",
     "validate_pose_frame",
@@ -26,4 +30,3 @@ __all__ = [
     "DEFAULT_UPPER_BODY_INDICES",
     "POSE_LEG_INDICES",
 ]
-

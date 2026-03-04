@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections import deque
 from dataclasses import dataclass, field
+import time
 
 import numpy as np
 
@@ -36,6 +37,7 @@ class StreamingBioResult:
     active_sign_progress: float = 0.0
     active_phrase_progress: float = 0.0
     latency_ms: float | None = None
+    decode_latency_ms: float | None = None
     buffer_len: int = 0
     buffer_start: int = 0
     buffer_end: int = -1
@@ -262,7 +264,9 @@ class StreamingBioSegmenter:
         self._update_aggregation(window_indices, sign_probs, phrase_probs)
         self._prune_aggregation()
 
+        decode_started = time.perf_counter()
         all_sign, all_phrase, active_sign, active_phrase, sign_progress, phrase_progress = self._decode_segments_for_buffer()
+        decode_latency_ms = (time.perf_counter() - decode_started) * 1000.0
         self._latest_sign_segments = list(all_sign)
         self._latest_phrase_segments = list(all_phrase)
 
@@ -289,6 +293,7 @@ class StreamingBioSegmenter:
             active_sign_progress=float(sign_progress),
             active_phrase_progress=float(phrase_progress),
             latency_ms=float(latency_ms),
+            decode_latency_ms=float(decode_latency_ms),
             buffer_len=len(self._frame_indices),
             buffer_start=start,
             buffer_end=end,
