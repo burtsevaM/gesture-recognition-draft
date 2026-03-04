@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import time
 from collections import deque
 from concurrent.futures import Future, ThreadPoolExecutor
@@ -52,6 +53,7 @@ INDEX_PATH = ARTIFACTS_DIR / "faiss.index"
 META_PATH = ARTIFACTS_DIR / "meta.json"
 UNCERTAIN_DIR = ARTIFACTS_DIR / "uncertain_events"
 VLM_EXECUTOR = ThreadPoolExecutor(max_workers=1, thread_name_prefix="vlm-judge")
+LOGGER = logging.getLogger(__name__)
 
 
 class RuntimeContext:
@@ -70,10 +72,50 @@ class RuntimeContext:
         self._event_logger: UncertainEventLogger | None = None
 
         self.errors: dict[str, str] = {}
+        self._logged_missing_paths: set[str] = set()
 
     def reload_config(self) -> AppConfig:
         self.config = load_config(CONFIG_PATH)
+        self._logged_missing_paths.clear()
         return self.config
+
+    @staticmethod
+    def _resolve_runtime_path(path_value: str) -> Path:
+        path = Path(path_value)
+        if not path.is_absolute():
+            path = (ROOT_DIR / path).resolve()
+        return path
+
+    def _log_missing_artifact_once(self, path: Path) -> None:
+        token = str(path)
+        if token in self._logged_missing_paths:
+            return
+        self._logged_missing_paths.add(token)
+        LOGGER.error("Missing required pose_words artifact: %s", path)
+
+    def _pose_words_artifact_paths(self) -> dict[str, Path]:
+        cfg = self.config
+        required: dict[str, Path] = {}
+        if cfg.recognition_mode != "pose_words":
+            return required
+
+        if cfg.segmentation_enabled:
+            required["pose_word_model.onnx"] = self._resolve_runtime_path(cfg.pose_word_model_path)
+            required["pose_word_labels.txt"] = self._resolve_runtime_path(cfg.pose_word_labels_path)
+            required["pose_word_config.json"] = self._resolve_runtime_path(cfg.pose_word_config_path)
+            required["bio_segmenter.onnx"] = self._resolve_runtime_path(cfg.segmentation_model_path)
+            required["bio_config.json"] = self._resolve_runtime_path(cfg.segmentation_config_path)
+            required["bio_thresholds.json"] = self._resolve_runtime_path(cfg.segmentation_thresholds_path)
+        return required
+
+    def pose_words_missing_artifacts(self) -> list[str]:
+        missing: list[str] = []
+        for artifact_name, artifact_path in self._pose_words_artifact_paths().items():
+            if artifact_path.exists():
+                continue
+            self._log_missing_artifact_once(artifact_path)
+            missing.append(artifact_name)
+        return missing
 
     def get_hand_detector(self) -> HandDetector | None:
         with self.lock:
@@ -195,16 +237,17 @@ class RuntimeContext:
                 return self._bio_segmenter_model
             try:
                 cfg = self.config
-                model_path = Path(cfg.segmentation_model_path)
-                if not model_path.is_absolute():
-                    model_path = (ROOT_DIR / model_path).resolve()
+                model_path = self._resolve_runtime_path(cfg.segmentation_model_path)
+                config_path = self._resolve_runtime_path(cfg.segmentation_config_path)
                 self._bio_segmenter_model = BioSegmenterOnnxModel(
                     model_path=model_path,
+                    config_path=config_path,
                     ort_num_threads=cfg.segmentation_ort_num_threads,
                 )
                 self.errors.pop("bio_segmenter_model", None)
             except Exception as exc:
                 self.errors["bio_segmenter_model"] = str(exc)
+                LOGGER.error("BIO segmenter init failed: %s", exc)
                 return None
             return self._bio_segmenter_model
 
@@ -214,20 +257,19 @@ class RuntimeContext:
                 return self._pose_word_model
             try:
                 cfg = self.config
-                model_path = Path(cfg.pose_word_model_path)
-                labels_path = Path(cfg.pose_word_labels_path)
-                if not model_path.is_absolute():
-                    model_path = (ROOT_DIR / model_path).resolve()
-                if not labels_path.is_absolute():
-                    labels_path = (ROOT_DIR / labels_path).resolve()
+                model_path = self._resolve_runtime_path(cfg.pose_word_model_path)
+                labels_path = self._resolve_runtime_path(cfg.pose_word_labels_path)
+                config_path = self._resolve_runtime_path(cfg.pose_word_config_path)
                 self._pose_word_model = PoseWordOnnxModel(
                     model_path=model_path,
                     labels_path=labels_path,
+                    config_path=config_path,
                     ort_num_threads=cfg.pose_word_ort_num_threads,
                 )
                 self.errors.pop("pose_word_model", None)
             except Exception as exc:
                 self.errors["pose_word_model"] = str(exc)
+                LOGGER.error("Pose word model init failed: %s", exc)
                 return None
             return self._pose_word_model
 
@@ -270,9 +312,12 @@ class RuntimeContext:
 
     def health(self) -> dict[str, Any]:
         cfg = self.config
+        missing_artifacts = self.pose_words_missing_artifacts() if cfg.recognition_mode == "pose_words" else []
         segmentation_ready = False
         pose_word_model_ready = False
         pose_extractor_ready = False
+        pose_words_ready = False
+        runtime_ready = False
         if cfg.recognition_mode == "pose_words":
             hand_ready = False
             embed_ready = False
@@ -284,7 +329,10 @@ class RuntimeContext:
                 segmentation_ready = self.get_bio_segmenter_model() is not None
                 pose_word_model_ready = self.get_pose_word_model() is not None
             index_size = 0
-            ok = bool(pose_extractor_ready) and (not cfg.segmentation_enabled or (segmentation_ready and pose_word_model_ready))
+            pose_words_ready = bool(pose_extractor_ready) and (
+                not cfg.segmentation_enabled or (segmentation_ready and pose_word_model_ready and not missing_artifacts)
+            )
+            runtime_ready = pose_words_ready
         elif cfg.recognition_mode == "words":
             hand_ready = True
             embed_ready = False
@@ -293,7 +341,7 @@ class RuntimeContext:
             word_model = self.get_word_model()
             word_model_ready = word_model is not None
             index_size = len(word_model.labels) if word_model is not None else 0
-            ok = bool(word_model_ready)
+            runtime_ready = bool(word_model_ready)
         else:
             hand_ready = self.get_hand_detector() is not None
             embed_ready = self.get_embedder() is not None
@@ -301,7 +349,7 @@ class RuntimeContext:
             index_loaded = idx is not None and idx.size > 0
             word_model_ready = False
             index_size = idx.size if idx else 0
-            ok = hand_ready and embed_ready and index_loaded
+            runtime_ready = hand_ready and embed_ready and index_loaded
 
         vlm_reachable = False
         vlm_message = "disabled"
@@ -310,16 +358,20 @@ class RuntimeContext:
             vlm_reachable, vlm_message = judge.health()
 
         return {
-            "ok": ok,
+            "ok": True,
+            "ready": bool(runtime_ready),
+            "recognition_mode": cfg.recognition_mode,
             "config": cfg.to_dict(),
             "hand_detector_ready": hand_ready,
             "embedding_ready": embed_ready,
             "index_loaded": index_loaded,
             "index_size": index_size,
             "word_model_ready": word_model_ready,
+            "pose_words_ready": pose_words_ready,
             "pose_word_model_ready": pose_word_model_ready,
             "segmentation_ready": segmentation_ready,
             "pose_extractor_ready": pose_extractor_ready,
+            "missing_artifacts": missing_artifacts,
             "vlm_enabled": cfg.enable_vlm_judge,
             "vlm_reachable": vlm_reachable,
             "vlm_message": vlm_message,
@@ -396,9 +448,15 @@ class SessionProcessor:
                     ),
                 )
         elif self.recognition_mode == "pose_words" and bool(getattr(cfg, "segmentation_enabled", False)):
-            bio_model = runtime.get_bio_segmenter_model()
-            self.pose_word_model = runtime.get_pose_word_model()
-            if bio_model is None:
+            missing_artifacts = runtime.pose_words_missing_artifacts()
+            if missing_artifacts:
+                missing_str = ", ".join(missing_artifacts)
+                self.pose_init_error = f"missing artifacts: {missing_str}"
+            bio_model = runtime.get_bio_segmenter_model() if self.pose_init_error is None else None
+            self.pose_word_model = runtime.get_pose_word_model() if self.pose_init_error is None else None
+            if self.pose_init_error is not None:
+                pass
+            elif bio_model is None:
                 self.pose_init_error = runtime.errors.get("bio_segmenter_model", "BIO segmenter model is unavailable")
             elif self.pose_word_model is None:
                 self.pose_init_error = runtime.errors.get("pose_word_model", "pose word model is unavailable")

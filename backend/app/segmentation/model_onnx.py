@@ -37,10 +37,19 @@ def _to_probs(logits_or_probs: np.ndarray) -> np.ndarray:
 
 
 class BioSegmenterOnnxModel:
-    def __init__(self, *, model_path: str | Path, ort_num_threads: int = 1) -> None:
+    def __init__(
+        self,
+        *,
+        model_path: str | Path,
+        config_path: str | Path | None = None,
+        ort_num_threads: int = 1,
+    ) -> None:
         self.model_path = Path(model_path)
+        self.config_path = Path(config_path) if config_path is not None else None
         if not self.model_path.exists():
             raise FileNotFoundError(f"BIO segmenter ONNX not found: {self.model_path}")
+        if self.config_path is not None and not self.config_path.exists():
+            raise FileNotFoundError(f"BIO segmenter config not found: {self.config_path}")
 
         self.ort_num_threads = max(1, int(ort_num_threads))
         self._session: Any = None
@@ -48,7 +57,34 @@ class BioSegmenterOnnxModel:
         self._sign_output_name = ""
         self._phrase_output_name = ""
         self.input_feature_dim: int | None = None
+        self.runtime_config: dict[str, Any] = {}
+        self.config_feature_dim: int | None = None
+        if self.config_path is not None:
+            self.runtime_config = self._load_runtime_config(self.config_path)
         self._init_session()
+        self._validate_against_runtime_config()
+
+    def _load_runtime_config(self, path: Path) -> dict[str, Any]:
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except Exception as exc:
+            raise ValueError(f"failed to parse BIO config: {path}") from exc
+        if not isinstance(payload, dict):
+            raise ValueError(f"BIO config must be JSON object: {path}")
+
+        input_dim = payload.get("input_dim")
+        if isinstance(input_dim, (int, float)) and int(input_dim) > 0:
+            self.config_feature_dim = int(input_dim)
+        return payload
+
+    def _validate_against_runtime_config(self) -> None:
+        if self.config_feature_dim is None or self.input_feature_dim is None:
+            return
+        if int(self.config_feature_dim) != int(self.input_feature_dim):
+            raise ValueError(
+                "BIO feature dim mismatch between config and ONNX: "
+                f"config={self.config_feature_dim}, onnx={self.input_feature_dim}"
+            )
 
     def _init_session(self) -> None:
         try:

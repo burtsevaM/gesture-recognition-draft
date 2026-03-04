@@ -20,6 +20,7 @@ class AppConfig:
     pose_worker_output_size: int = 4
     segmentation_enabled: bool = False
     segmentation_model_path: str = "backend/artifacts/bio_segmenter.onnx"
+    segmentation_config_path: str = "backend/artifacts/bio_config.json"
     segmentation_thresholds_path: str = "backend/artifacts/bio_thresholds.json"
     segmentation_window: int = 256
     segmentation_step: int = 8
@@ -35,6 +36,7 @@ class AppConfig:
     segmentation_phrase_th_o: float = 0.5
     pose_word_model_path: str = "backend/artifacts/pose_word_model.onnx"
     pose_word_labels_path: str = "backend/artifacts/pose_word_labels.txt"
+    pose_word_config_path: str = "backend/artifacts/pose_word_config.json"
     pose_word_clip_frames: int = 32
     pose_word_topk: int = 5
     pose_word_no_event_label: str = "_no_event"
@@ -171,6 +173,7 @@ class AppConfig:
                 {
                     "enabled": "segmentation_enabled",
                     "model_path": "segmentation_model_path",
+                    "config_path": "segmentation_config_path",
                     "thresholds_path": "segmentation_thresholds_path",
                     "window": "segmentation_window",
                     "step": "segmentation_step",
@@ -203,6 +206,7 @@ class AppConfig:
                 {
                     "path": "pose_word_model_path",
                     "labels_path": "pose_word_labels_path",
+                    "config_path": "pose_word_config_path",
                     "clip_frames": "pose_word_clip_frames",
                     "topk": "pose_word_topk",
                     "ort_num_threads": "pose_word_ort_num_threads",

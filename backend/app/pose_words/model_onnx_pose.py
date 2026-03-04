@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import math
 import time
 from pathlib import Path
@@ -20,18 +21,28 @@ class PoseWordOnnxModel:
         *,
         model_path: str | Path,
         labels_path: str | Path,
+        config_path: str | Path | None = None,
         ort_num_threads: int = 1,
     ) -> None:
         self.model_path = Path(model_path)
         self.labels_path = Path(labels_path)
+        self.config_path = Path(config_path) if config_path is not None else None
         if not self.model_path.exists():
             raise FileNotFoundError(f"pose word ONNX not found: {self.model_path}")
         if not self.labels_path.exists():
             raise FileNotFoundError(f"pose word labels not found: {self.labels_path}")
+        if self.config_path is not None and not self.config_path.exists():
+            raise FileNotFoundError(f"pose word config not found: {self.config_path}")
 
         self.labels = self._load_labels(self.labels_path)
         if not self.labels:
             raise ValueError(f"labels file is empty: {self.labels_path}")
+
+        self.runtime_config: dict[str, Any] = {}
+        self.config_feature_dim: int | None = None
+        self.config_clip_frames: int | None = None
+        if self.config_path is not None:
+            self.runtime_config = self._load_runtime_config(self.config_path)
 
         self.ort_num_threads = max(1, int(ort_num_threads))
         self._session: Any = None
@@ -40,6 +51,7 @@ class PoseWordOnnxModel:
         self.input_feature_dim: int | None = None
         self.input_clip_frames: int | None = None
         self._init_session()
+        self._validate_against_runtime_config()
 
     @staticmethod
     def _load_labels(path: Path) -> list[str]:
@@ -49,6 +61,63 @@ class PoseWordOnnxModel:
             if text:
                 labels.append(text)
         return labels
+
+    def _load_runtime_config(self, path: Path) -> dict[str, Any]:
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except Exception as exc:
+            raise ValueError(f"failed to parse pose word config: {path}") from exc
+        if not isinstance(payload, dict):
+            raise ValueError(f"pose word config must be JSON object: {path}")
+
+        input_cfg = payload.get("input") if isinstance(payload.get("input"), dict) else {}
+        shape = input_cfg.get("shape") if isinstance(input_cfg.get("shape"), list) else None
+        cfg_clip = None
+        cfg_feat = None
+        if isinstance(shape, list) and len(shape) >= 3:
+            if isinstance(shape[1], (int, float)):
+                cfg_clip = int(shape[1])
+            if isinstance(shape[2], (int, float)):
+                cfg_feat = int(shape[2])
+
+        if cfg_clip is None:
+            if isinstance(payload.get("clip_frames"), (int, float)):
+                cfg_clip = int(payload["clip_frames"])
+            elif isinstance(payload.get("model"), dict) and isinstance(payload["model"].get("clip_frames"), (int, float)):
+                cfg_clip = int(payload["model"]["clip_frames"])
+        if cfg_feat is None:
+            if isinstance(payload.get("input_dim"), (int, float)):
+                cfg_feat = int(payload["input_dim"])
+            elif isinstance(payload.get("model"), dict) and isinstance(payload["model"].get("input_dim"), (int, float)):
+                cfg_feat = int(payload["model"]["input_dim"])
+
+        self.config_clip_frames = cfg_clip if cfg_clip and cfg_clip > 0 else None
+        self.config_feature_dim = cfg_feat if cfg_feat and cfg_feat > 0 else None
+        return payload
+
+    def _validate_against_runtime_config(self) -> None:
+        if self.config_path is None:
+            return
+
+        expected_labels = self.runtime_config.get("labels_total")
+        if isinstance(expected_labels, (int, float)) and int(expected_labels) > 0:
+            if int(expected_labels) != len(self.labels):
+                raise ValueError(
+                    f"pose word labels size mismatch: config={int(expected_labels)} file={len(self.labels)}"
+                )
+
+        if self.config_clip_frames is not None and self.input_clip_frames is not None:
+            if int(self.config_clip_frames) != int(self.input_clip_frames):
+                raise ValueError(
+                    "pose word clip length mismatch between config and ONNX: "
+                    f"config={self.config_clip_frames}, onnx={self.input_clip_frames}"
+                )
+        if self.config_feature_dim is not None and self.input_feature_dim is not None:
+            if int(self.config_feature_dim) != int(self.input_feature_dim):
+                raise ValueError(
+                    "pose word feature dim mismatch between config and ONNX: "
+                    f"config={self.config_feature_dim}, onnx={self.input_feature_dim}"
+                )
 
     def _init_session(self) -> None:
         try:
