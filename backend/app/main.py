@@ -25,11 +25,10 @@ from .hand_detector import HandDetection, HandDetector
 from .logging_utils import UncertainEventLogger
 from .pose import PoseExtractor, compose_features, hand_normalize_3d, shoulder_normalize
 from .pose.datatypes import PoseFrame, PoseLandmarksGroup
-from .pose_words import resample_to_fixed_T
+from .pose_words import PoseWordOnnxModel, resample_to_fixed_T
 from .retrieval import GalleryIndex, RetrievalHit
 from .segmentation import (
     BioSegmenterOnnxModel,
-    PoseWordOnnxModel,
     StreamingBioSegmenter,
     load_bio_thresholds,
 )

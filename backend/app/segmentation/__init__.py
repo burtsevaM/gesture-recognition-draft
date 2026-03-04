@@ -7,7 +7,8 @@ from .metrics import (
     segments_per_minute,
     stability_score,
 )
-from .model_onnx import BioSegmenterOnnxModel, BioThresholdConfig, PoseWordOnnxModel, load_bio_thresholds
+from ..pose_words import PoseWordOnnxModel
+from .model_onnx import BioSegmenterOnnxModel, BioThresholdConfig, load_bio_thresholds
 from .streaming import BioSegment, StreamingBioResult, StreamingBioSegmenter
 
 __all__ = [
