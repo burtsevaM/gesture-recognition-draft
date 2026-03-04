@@ -448,7 +448,8 @@ class SessionProcessor:
                     ),
                 )
         elif self.recognition_mode == "pose_words" and bool(getattr(cfg, "segmentation_enabled", False)):
-            missing_artifacts = runtime.pose_words_missing_artifacts()
+            missing_fn = getattr(runtime, "pose_words_missing_artifacts", None)
+            missing_artifacts = missing_fn() if callable(missing_fn) else []
             if missing_artifacts:
                 missing_str = ", ".join(missing_artifacts)
                 self.pose_init_error = f"missing artifacts: {missing_str}"

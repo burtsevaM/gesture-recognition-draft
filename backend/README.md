@@ -24,6 +24,14 @@ pip install -r backend/requirements.txt
 
 - `backend/artifacts/pose_word_config.json`
 
+Если артефактов нет, сгенерируй baseline локально одной командой:
+
+```bash
+python -m backend.scripts.bootstrap_pose_words_artifacts
+```
+
+Документация по артефактам: `backend/docs/pose_words_artifacts.md`.
+
 ## 3) Включение режима pose_words + segmentation
 
 Из корня репозитория:
