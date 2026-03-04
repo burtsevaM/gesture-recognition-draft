@@ -1,4 +1,6 @@
-recognition_mode: words
+recognition_mode: pose_words
+use_shoulder_norm: true
+use_hands_3d_norm: false
 frontend_fps: 8
 jpeg_quality: 0.75
 hold_ms: 700
@@ -71,3 +73,29 @@ performance:
 runtime_log:
   enabled: true
   path: backend/artifacts/words_runtime.jsonl
+segmentation:
+  enabled: false
+  model_path: backend/artifacts/bio_segmenter.onnx
+  thresholds_path: backend/artifacts/bio_thresholds.json
+  window: 256
+  step: 8
+  min_len: 6
+  merge_gap: 2
+  max_buffer: 512
+  ort_num_threads: 1
+pose_word_model:
+  path: backend/artifacts/pose_word_model.onnx
+  labels_path: backend/artifacts/pose_word_labels.txt
+  clip_frames: 32
+  topk: 5
+  ort_num_threads: 1
+pose_word_thresholds:
+  no_event_label: _no_event
+  th_no_event: 0.6
+  th_unknown: 0.55
+  th_margin: 0.1
+pose_word_commit_logic:
+  ema_alpha: 0.3
+  hold_segments: 2
+  cooldown_segments: 2
+  dedup_same_word: true

@@ -352,6 +352,68 @@ function drawSkeletonOverlay(data) {
   return drawn;
 }
 
+function drawSegmentsOverlay(data) {
+  const segments = data?.segments;
+  const debugBio = data?.debug?.bio;
+  if (!segments && !debugBio) {
+    return;
+  }
+
+  const signSegments = Array.isArray(segments?.sign) ? segments.sign : [];
+  const phraseSegments = Array.isArray(segments?.phrase) ? segments.phrase : [];
+  const bufferStart = Number(debugBio?.buffer_start);
+  const bufferEnd = Number(debugBio?.buffer_end);
+  const hasRange = Number.isFinite(bufferStart) && Number.isFinite(bufferEnd) && bufferEnd >= bufferStart;
+
+  if (hasRange && (signSegments.length > 0 || phraseSegments.length > 0)) {
+    const span = Math.max(1, (bufferEnd - bufferStart + 1));
+    const barHeight = 16;
+    const baseY = canvasEl.height - barHeight - 8;
+
+    ctx.save();
+    ctx.fillStyle = 'rgba(14, 18, 25, 0.45)';
+    ctx.fillRect(4, baseY - 6, canvasEl.width - 8, barHeight + 10);
+
+    for (const seg of phraseSegments) {
+      const x1 = ((Number(seg.start) - bufferStart) / span) * canvasEl.width;
+      const x2 = ((Number(seg.end) - bufferStart + 1) / span) * canvasEl.width;
+      ctx.fillStyle = 'rgba(255, 194, 96, 0.35)';
+      ctx.fillRect(Math.max(0, x1), baseY + 8, Math.max(2, x2 - x1), 4);
+    }
+
+    for (const seg of signSegments) {
+      const x1 = ((Number(seg.start) - bufferStart) / span) * canvasEl.width;
+      const x2 = ((Number(seg.end) - bufferStart + 1) / span) * canvasEl.width;
+      ctx.fillStyle = 'rgba(118, 255, 176, 0.7)';
+      ctx.fillRect(Math.max(0, x1), baseY, Math.max(2, x2 - x1), 6);
+      ctx.strokeStyle = 'rgba(255, 255, 255, 0.55)';
+      ctx.lineWidth = 1;
+      ctx.beginPath();
+      ctx.moveTo(x1, baseY - 2);
+      ctx.lineTo(x1, baseY + 8);
+      ctx.stroke();
+      ctx.beginPath();
+      ctx.moveTo(x2, baseY - 2);
+      ctx.lineTo(x2, baseY + 8);
+      ctx.stroke();
+    }
+    ctx.restore();
+  }
+
+  if (Boolean(debugBio?.active_sign)) {
+    const progress = Number(debugBio?.active_sign_progress || 0);
+    const text = `SEGMENT: ON ${Math.round(Math.max(0, Math.min(1, progress)) * 100)}%`;
+    ctx.save();
+    ctx.fillStyle = 'rgba(255, 126, 154, 0.92)';
+    ctx.font = '600 14px "SF Mono", monospace';
+    ctx.fillText(text, 14, 26);
+    ctx.strokeStyle = 'rgba(255, 126, 154, 0.85)';
+    ctx.lineWidth = 2.5;
+    ctx.strokeRect(8, 8, canvasEl.width - 16, canvasEl.height - 16);
+    ctx.restore();
+  }
+}
+
 function setStatusClass(status) {
   statusEl.className = '';
   const normalized = String(status || '').toLowerCase();
@@ -558,6 +620,10 @@ function renderLoop() {
     // В режиме скелета без данных ничего не рисуем.
   }
 
+  if (stateFresh && latest) {
+    drawSegmentsOverlay(latest);
+  }
+
   renderReq = requestAnimationFrame(renderLoop);
 }
 
@@ -602,7 +668,12 @@ function renderState(data) {
   const fpMin = dbg.fp_per_minute === null || dbg.fp_per_minute === undefined ? 'n/a' : Number(dbg.fp_per_minute).toFixed(2);
   const avgLat = dbg.avg_infer_latency_ms === null || dbg.avg_infer_latency_ms === undefined ? 'n/a' : Number(dbg.avg_infer_latency_ms).toFixed(1);
   const p95Lat = dbg.p95_infer_latency_ms === null || dbg.p95_infer_latency_ms === undefined ? 'n/a' : Number(dbg.p95_infer_latency_ms).toFixed(1);
-  debugEl.textContent = `sim1=${Number(dbg.sim1 || 0).toFixed(3)} | sim2=${Number(dbg.sim2 || 0).toFixed(3)} | margin=${Number(dbg.margin || 0).toFixed(3)} | uncertain=${Boolean(dbg.uncertain)} | cooldown=${dbg.cooldown_left_ms || 0}${holdUnit === 'frames' ? 'fr' : 'мс'} | latency=${latency}ms | fp/min=${fpMin} | avg=${avgLat}ms p95=${p95Lat}ms`;
+  const bio = dbg.bio || {};
+  const seg = data.segments || {};
+  const signSegCount = Array.isArray(seg.sign) ? seg.sign.length : 0;
+  const phraseSegCount = Array.isArray(seg.phrase) ? seg.phrase.length : 0;
+  const bioActive = Boolean(bio.active_sign);
+  debugEl.textContent = `sim1=${Number(dbg.sim1 || 0).toFixed(3)} | sim2=${Number(dbg.sim2 || 0).toFixed(3)} | margin=${Number(dbg.margin || 0).toFixed(3)} | uncertain=${Boolean(dbg.uncertain)} | cooldown=${dbg.cooldown_left_ms || 0}${holdUnit === 'frames' ? 'fr' : 'мс'} | latency=${latency}ms | fp/min=${fpMin} | avg=${avgLat}ms p95=${p95Lat}ms | seg(sign=${signSegCount}, phrase=${phraseSegCount}, active=${bioActive})`;
 
   const vlm = data.vlm || {};
   vlmUsedEl.textContent = String(Boolean(vlm.used));

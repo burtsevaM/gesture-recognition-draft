@@ -45,3 +45,71 @@ thresholds:
     assert cfg.word_th_no_event == 0.61
     assert cfg.word_th_unknown == 0.57
     assert cfg.word_th_margin == 0.12
+
+
+def test_pose_words_flags_parsing(tmp_path: Path) -> None:
+    path = tmp_path / 'config.yaml'
+    path.write_text(
+        """
+recognition_mode: pose_words
+use_shoulder_norm: false
+use_hands_3d_norm: true
+""".strip(),
+        encoding='utf-8',
+    )
+    cfg = load_config(path)
+    assert cfg.recognition_mode == 'pose_words'
+    assert cfg.use_shoulder_norm is False
+    assert cfg.use_hands_3d_norm is True
+
+
+def test_pose_words_segmentation_parsing(tmp_path: Path) -> None:
+    path = tmp_path / 'config.yaml'
+    path.write_text(
+        """
+recognition_mode: pose_words
+segmentation:
+  enabled: true
+  model_path: backend/artifacts/bio_segmenter.onnx
+  thresholds_path: backend/artifacts/bio_thresholds.json
+  window: 192
+  step: 6
+  min_len: 5
+  merge_gap: 1
+  max_buffer: 384
+pose_word_model:
+  path: backend/artifacts/pose_word_model.onnx
+  labels_path: backend/artifacts/pose_word_labels.txt
+  clip_frames: 24
+  topk: 7
+pose_word_thresholds:
+  no_event_label: "---"
+  th_no_event: 0.62
+  th_unknown: 0.59
+  th_margin: 0.11
+pose_word_commit_logic:
+  ema_alpha: 0.25
+  hold_segments: 3
+  cooldown_segments: 4
+  dedup_same_word: false
+""".strip(),
+        encoding='utf-8',
+    )
+    cfg = load_config(path)
+    assert cfg.recognition_mode == 'pose_words'
+    assert cfg.segmentation_enabled is True
+    assert cfg.segmentation_window == 192
+    assert cfg.segmentation_step == 6
+    assert cfg.segmentation_min_len == 5
+    assert cfg.segmentation_merge_gap == 1
+    assert cfg.segmentation_max_buffer == 384
+    assert cfg.pose_word_clip_frames == 24
+    assert cfg.pose_word_topk == 7
+    assert cfg.pose_word_no_event_label == '---'
+    assert cfg.pose_word_th_no_event == 0.62
+    assert cfg.pose_word_th_unknown == 0.59
+    assert cfg.pose_word_th_margin == 0.11
+    assert cfg.pose_word_ema_alpha == 0.25
+    assert cfg.pose_word_hold_segments == 3
+    assert cfg.pose_word_cooldown_segments == 4
+    assert cfg.pose_word_dedup_same_word is False

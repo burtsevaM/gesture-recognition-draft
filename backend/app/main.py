@@ -22,13 +22,22 @@ from .config import AppConfig, load_config
 from .embedding import DinoEmbedder
 from .hand_detector import HandDetection, HandDetector
 from .logging_utils import UncertainEventLogger
+from .pose import PoseExtractor, compose_features, hand_normalize_3d, shoulder_normalize
+from .pose.datatypes import PoseFrame, PoseLandmarksGroup
 from .retrieval import GalleryIndex, RetrievalHit
+from .segmentation import (
+    BioSegmenterOnnxModel,
+    PoseWordOnnxModel,
+    StreamingBioSegmenter,
+    load_bio_thresholds,
+)
 from .schemas import TopKItem, VLMDecision, build_inference_message
 from .state_machine import HoldToCommitStateMachine
 from .vlm_judge import JudgeResult, VLMJudge
 from .words.model_onnx import WordOnnxModel
+from .words.metrics import WordRuntimeMetrics
 from .words.service import WordRecognitionService, WordServiceConfig
-from .words.decoder import WordThresholds
+from .words.decoder import WordDecisionDecoder, WordThresholds
 
 ROOT_DIR = Path(__file__).resolve().parents[2]
 BACKEND_DIR = ROOT_DIR / "backend"
@@ -48,9 +57,12 @@ class RuntimeContext:
         self.config = load_config(CONFIG_PATH)
 
         self._hand_detector: HandDetector | None = None
+        self._pose_extractor: PoseExtractor | None = None
         self._embedder: DinoEmbedder | None = None
         self._gallery_index: GalleryIndex | None = None
         self._word_model: WordOnnxModel | None = None
+        self._bio_segmenter_model: BioSegmenterOnnxModel | None = None
+        self._pose_word_model: PoseWordOnnxModel | None = None
         self._vlm_judge: VLMJudge | None = None
         self._event_logger: UncertainEventLogger | None = None
 
@@ -102,6 +114,18 @@ class RuntimeContext:
                 self.errors["embedder"] = str(exc)
                 return None
             return self._embedder
+
+    def get_pose_extractor(self) -> PoseExtractor | None:
+        with self.lock:
+            if self._pose_extractor is not None:
+                return self._pose_extractor
+            try:
+                self._pose_extractor = PoseExtractor(include_face=False)
+                self.errors.pop("pose_extractor", None)
+            except Exception as exc:
+                self.errors["pose_extractor"] = str(exc)
+                return None
+            return self._pose_extractor
 
     def get_gallery_index(self) -> GalleryIndex | None:
         with self.lock:
@@ -162,6 +186,48 @@ class RuntimeContext:
                 return None
             return self._word_model
 
+    def get_bio_segmenter_model(self) -> BioSegmenterOnnxModel | None:
+        with self.lock:
+            if self._bio_segmenter_model is not None:
+                return self._bio_segmenter_model
+            try:
+                cfg = self.config
+                model_path = Path(cfg.segmentation_model_path)
+                if not model_path.is_absolute():
+                    model_path = (ROOT_DIR / model_path).resolve()
+                self._bio_segmenter_model = BioSegmenterOnnxModel(
+                    model_path=model_path,
+                    ort_num_threads=cfg.segmentation_ort_num_threads,
+                )
+                self.errors.pop("bio_segmenter_model", None)
+            except Exception as exc:
+                self.errors["bio_segmenter_model"] = str(exc)
+                return None
+            return self._bio_segmenter_model
+
+    def get_pose_word_model(self) -> PoseWordOnnxModel | None:
+        with self.lock:
+            if self._pose_word_model is not None:
+                return self._pose_word_model
+            try:
+                cfg = self.config
+                model_path = Path(cfg.pose_word_model_path)
+                labels_path = Path(cfg.pose_word_labels_path)
+                if not model_path.is_absolute():
+                    model_path = (ROOT_DIR / model_path).resolve()
+                if not labels_path.is_absolute():
+                    labels_path = (ROOT_DIR / labels_path).resolve()
+                self._pose_word_model = PoseWordOnnxModel(
+                    model_path=model_path,
+                    labels_path=labels_path,
+                    ort_num_threads=cfg.pose_word_ort_num_threads,
+                )
+                self.errors.pop("pose_word_model", None)
+            except Exception as exc:
+                self.errors["pose_word_model"] = str(exc)
+                return None
+            return self._pose_word_model
+
     def get_event_logger(self) -> UncertainEventLogger:
         with self.lock:
             if self._event_logger is None:
@@ -169,6 +235,9 @@ class RuntimeContext:
             return self._event_logger
 
     def allowed_labels(self) -> list[str]:
+        if self.config.recognition_mode == "pose_words":
+            return []
+
         if self.config.recognition_mode == "words":
             model = self.get_word_model()
             if model is None:
@@ -198,7 +267,22 @@ class RuntimeContext:
 
     def health(self) -> dict[str, Any]:
         cfg = self.config
-        if cfg.recognition_mode == "words":
+        segmentation_ready = False
+        pose_word_model_ready = False
+        pose_extractor_ready = False
+        if cfg.recognition_mode == "pose_words":
+            hand_ready = False
+            embed_ready = False
+            idx = None
+            index_loaded = False
+            word_model_ready = False
+            pose_extractor_ready = self.get_pose_extractor() is not None
+            if cfg.segmentation_enabled:
+                segmentation_ready = self.get_bio_segmenter_model() is not None
+                pose_word_model_ready = self.get_pose_word_model() is not None
+            index_size = 0
+            ok = bool(pose_extractor_ready) and (not cfg.segmentation_enabled or (segmentation_ready and pose_word_model_ready))
+        elif cfg.recognition_mode == "words":
             hand_ready = True
             embed_ready = False
             idx = None
@@ -230,6 +314,9 @@ class RuntimeContext:
             "index_loaded": index_loaded,
             "index_size": index_size,
             "word_model_ready": word_model_ready,
+            "pose_word_model_ready": pose_word_model_ready,
+            "segmentation_ready": segmentation_ready,
+            "pose_extractor_ready": pose_extractor_ready,
             "vlm_enabled": cfg.enable_vlm_judge,
             "vlm_reachable": vlm_reachable,
             "vlm_message": vlm_message,
@@ -252,6 +339,12 @@ class SessionProcessor:
         )
         self.words_service: WordRecognitionService | None = None
         self.words_init_error: str | None = None
+        self.pose_segmenter: StreamingBioSegmenter | None = None
+        self.pose_word_model: PoseWordOnnxModel | None = None
+        self.pose_word_decoder: WordDecisionDecoder | None = None
+        self.pose_word_metrics: WordRuntimeMetrics = WordRuntimeMetrics()
+        self.pose_no_event_index: int | None = None
+        self.pose_init_error: str | None = None
         if self.recognition_mode == "words":
             model = runtime.get_word_model()
             if model is None:
@@ -282,6 +375,42 @@ class SessionProcessor:
                         log_path=log_path,
                     ),
                 )
+        elif self.recognition_mode == "pose_words" and bool(getattr(cfg, "segmentation_enabled", False)):
+            bio_model = runtime.get_bio_segmenter_model()
+            self.pose_word_model = runtime.get_pose_word_model()
+            if bio_model is None:
+                self.pose_init_error = runtime.errors.get("bio_segmenter_model", "BIO segmenter model is unavailable")
+            elif self.pose_word_model is None:
+                self.pose_init_error = runtime.errors.get("pose_word_model", "pose word model is unavailable")
+            else:
+                thresholds_path = Path(cfg.segmentation_thresholds_path)
+                if not thresholds_path.is_absolute():
+                    thresholds_path = (ROOT_DIR / thresholds_path).resolve()
+                thresholds = load_bio_thresholds(thresholds_path)
+                self.pose_segmenter = StreamingBioSegmenter(
+                    model=bio_model,
+                    window=cfg.segmentation_window,
+                    step=cfg.segmentation_step,
+                    min_len=cfg.segmentation_min_len,
+                    merge_gap=cfg.segmentation_merge_gap,
+                    sign_th_b=thresholds.sign_th_b if thresholds.sign_th_b > 0 else cfg.segmentation_sign_th_b,
+                    sign_th_o=thresholds.sign_th_o if thresholds.sign_th_o > 0 else cfg.segmentation_sign_th_o,
+                    phrase_th_b=thresholds.phrase_th_b if thresholds.phrase_th_b > 0 else cfg.segmentation_phrase_th_b,
+                    phrase_th_o=thresholds.phrase_th_o if thresholds.phrase_th_o > 0 else cfg.segmentation_phrase_th_o,
+                    max_buffer=cfg.segmentation_max_buffer,
+                )
+                self.pose_word_decoder = WordDecisionDecoder(
+                    ema_alpha=cfg.pose_word_ema_alpha,
+                    thresholds=WordThresholds(
+                        th_no_event=cfg.pose_word_th_no_event,
+                        th_unknown=cfg.pose_word_th_unknown,
+                        th_margin=cfg.pose_word_th_margin,
+                    ),
+                    hold_frames=cfg.pose_word_hold_segments,
+                    cooldown_frames=cfg.pose_word_cooldown_segments,
+                    dedup_same_word=cfg.pose_word_dedup_same_word,
+                )
+                self.pose_no_event_index = self.pose_word_model.find_no_event_index(cfg.pose_word_no_event_label)
 
         self.cached_vlm_candidate_key: str | None = None
         self.cached_vlm_result: JudgeResult | None = None
@@ -299,6 +428,384 @@ class SessionProcessor:
         self.state.clear_text()
         if self.words_service is not None:
             self.words_service.clear_text()
+        if self.pose_word_decoder is not None:
+            self.pose_word_decoder.clear_text()
+
+    @staticmethod
+    def _copy_landmarks_group(group: PoseLandmarksGroup | None) -> PoseLandmarksGroup | None:
+        if group is None:
+            return None
+        conf = None if group.confidence is None else group.confidence.copy()
+        return PoseLandmarksGroup(points=group.points.copy(), confidence=conf)
+
+    @classmethod
+    def _copy_pose_frame(cls, frame: PoseFrame) -> PoseFrame:
+        return PoseFrame(
+            timestamp=float(frame.timestamp),
+            body=cls._copy_landmarks_group(frame.body),
+            left_hand=cls._copy_landmarks_group(frame.left_hand),
+            right_hand=cls._copy_landmarks_group(frame.right_hand),
+            face=cls._copy_landmarks_group(frame.face),
+            meta=dict(frame.meta),
+        )
+
+    @staticmethod
+    def _group_to_skeleton_payload(group: PoseLandmarksGroup | None) -> dict[str, Any] | None:
+        if group is None:
+            return None
+        payload: dict[str, Any] = {
+            "points": group.points.astype(np.float32).tolist(),
+        }
+        if group.confidence is not None:
+            payload["confidence"] = group.confidence.astype(np.float32).tolist()
+        return payload
+
+    @classmethod
+    def _frame_to_skeleton_payload(cls, frame: PoseFrame | None) -> dict[str, Any]:
+        if frame is None:
+            return {"body": None, "lh": None, "rh": None}
+        return {
+            "body": cls._group_to_skeleton_payload(frame.body),
+            "lh": cls._group_to_skeleton_payload(frame.left_hand),
+            "rh": cls._group_to_skeleton_payload(frame.right_hand),
+        }
+
+    def _normalize_pose_frame(self, pose_frame: PoseFrame) -> PoseFrame:
+        cfg = self.runtime.config
+        if cfg.use_shoulder_norm:
+            normalized, _ = shoulder_normalize([pose_frame], safe_mode=True)
+            if normalized:
+                frame = normalized[0]
+            else:
+                frame = self._copy_pose_frame(pose_frame)
+        else:
+            frame = self._copy_pose_frame(pose_frame)
+
+        if cfg.use_hands_3d_norm:
+            if frame.left_hand is not None:
+                frame.left_hand.points = hand_normalize_3d(frame.left_hand.points)
+            if frame.right_hand is not None:
+                frame.right_hand.points = hand_normalize_3d(frame.right_hand.points)
+        return frame
+
+    @staticmethod
+    def _resample_feature_clip(features: np.ndarray, target_frames: int) -> np.ndarray:
+        arr = np.asarray(features, dtype=np.float32)
+        if arr.ndim != 2:
+            raise ValueError(f"segment features must have shape [T, F], got {arr.shape}")
+        if arr.shape[0] == 0:
+            raise ValueError("segment features are empty")
+        target = max(1, int(target_frames))
+        if arr.shape[0] == target:
+            return arr
+        if arr.shape[0] == 1:
+            return np.repeat(arr, repeats=target, axis=0).astype(np.float32)
+        source = np.linspace(0, arr.shape[0] - 1, num=arr.shape[0], dtype=np.float32)
+        target_x = np.linspace(0, arr.shape[0] - 1, num=target, dtype=np.float32)
+        out = np.zeros((target, arr.shape[1]), dtype=np.float32)
+        for feat_i in range(arr.shape[1]):
+            out[:, feat_i] = np.interp(target_x, source, arr[:, feat_i])
+        return out
+
+    @staticmethod
+    def _serialize_segments(segments: list[Any]) -> list[dict[str, float | int]]:
+        return [
+            {
+                "start": int(getattr(seg, "start", 0)),
+                "end": int(getattr(seg, "end", -1)),
+                "score": float(getattr(seg, "score", 0.0)),
+            }
+            for seg in segments
+        ]
+
+    def _none_pose_message(
+        self,
+        *,
+        now_ms: int,
+        error: str = "",
+        hand_present: bool = False,
+        skeleton_raw: dict[str, Any] | None = None,
+        skeleton_norm: dict[str, Any] | None = None,
+        segments: dict[str, list[dict[str, float | int]]] | None = None,
+        bio_debug: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        cfg = self.runtime.config
+        text_value = self.pose_word_decoder.text_value if self.pose_word_decoder is not None else self.state.text_value
+        seg_enabled = bool(getattr(cfg, "segmentation_enabled", False))
+        hold_target = int(getattr(cfg, "pose_word_hold_segments", cfg.hold_ms)) if seg_enabled else cfg.hold_ms
+        hold_unit = "segments" if seg_enabled else "frames"
+        payload = build_inference_message(
+            status="NONE",
+            letter="NONE",
+            word="NONE",
+            score=0.0,
+            confidence=0.0,
+            hand_present=bool(hand_present),
+            bbox_norm=[0.0, 0.0, 0.0, 0.0],
+            hold_elapsed_ms=0,
+            hold_target_ms=max(1, int(hold_target)),
+            text_value=text_value,
+            committed_now=False,
+            topk=[],
+            vlm=VLMDecision(),
+            sim1=0.0,
+            sim2=0.0,
+            margin=0.0,
+            uncertain=False,
+            cooldown_left_ms=0,
+            mode="pose_words",
+            hold_unit=hold_unit,
+            latency_ms=None,
+            fp_per_minute=self.pose_word_metrics.fp_per_minute(),
+            avg_infer_latency_ms=self.pose_word_metrics.latency_summary().avg_ms,
+            p95_infer_latency_ms=self.pose_word_metrics.latency_summary().p95_ms,
+        )
+        payload["timestamp_ms"] = int(now_ms)
+        payload["skeleton"] = {
+            "raw": skeleton_raw or {"body": None, "lh": None, "rh": None},
+            "norm": skeleton_norm or {"body": None, "lh": None, "rh": None},
+        }
+        if segments is not None:
+            payload["segments"] = segments
+        if bio_debug:
+            payload.setdefault("debug", {})["bio"] = bio_debug
+        if error:
+            payload["error"] = error
+        return payload
+
+    def _process_pose_words(self, frame_bgr: np.ndarray, now_ms: int) -> dict[str, Any]:
+        cfg = self.runtime.config
+        extractor = self.runtime.get_pose_extractor()
+        if extractor is None:
+            return self._none_pose_message(
+                now_ms=now_ms,
+                error=self.runtime.errors.get("pose_extractor", "pose extractor is unavailable"),
+            )
+
+        if cv2 is not None:
+            frame_rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
+        else:
+            frame_rgb = frame_bgr[:, :, ::-1]
+
+        try:
+            pose_frame = extractor.process(frame_rgb)
+        except Exception as exc:
+            return self._none_pose_message(now_ms=now_ms, error=f"pose extraction error: {exc}")
+
+        if pose_frame is None:
+            return self._none_pose_message(now_ms=now_ms)
+
+        norm_frame = self._normalize_pose_frame(pose_frame)
+        hand_present = bool(norm_frame.left_hand is not None or norm_frame.right_hand is not None)
+        skeleton_raw = self._frame_to_skeleton_payload(pose_frame)
+        skeleton_norm = self._frame_to_skeleton_payload(norm_frame)
+
+        if not bool(getattr(cfg, "segmentation_enabled", False)):
+            payload = build_inference_message(
+                status="POSE",
+                letter="NONE",
+                word="NONE",
+                score=0.0,
+                confidence=0.0,
+                hand_present=hand_present,
+                bbox_norm=[0.0, 0.0, 0.0, 0.0],
+                hold_elapsed_ms=0,
+                hold_target_ms=max(1, int(cfg.hold_ms)),
+                text_value=self.state.text_value,
+                committed_now=False,
+                topk=[],
+                vlm=VLMDecision(),
+                sim1=0.0,
+                sim2=0.0,
+                margin=0.0,
+                uncertain=False,
+                cooldown_left_ms=self.state.cooldown_left_ms(now_ms),
+                mode="pose_words",
+            )
+            payload["timestamp_ms"] = int(now_ms)
+            payload["skeleton"] = {"raw": skeleton_raw, "norm": skeleton_norm}
+            return payload
+
+        if self.pose_segmenter is None or self.pose_word_model is None or self.pose_word_decoder is None:
+            return self._none_pose_message(
+                now_ms=now_ms,
+                error=self.pose_init_error or "pose_words segmentation runtime is unavailable",
+                hand_present=hand_present,
+                skeleton_raw=skeleton_raw,
+                skeleton_norm=skeleton_norm,
+            )
+
+        feature_vec, _ = compose_features(
+            norm_frame,
+            apply_shoulder_norm=False,
+            hide_legs_before_body=True,
+            canonical_hands_3d=False,
+        )
+        feature_vec = np.asarray(feature_vec, dtype=np.float32).reshape(-1)
+
+        try:
+            segment_result = self.pose_segmenter.update(feature_vec)
+        except Exception as exc:
+            return self._none_pose_message(
+                now_ms=now_ms,
+                error=f"segmentation error: {exc}",
+                hand_present=hand_present,
+                skeleton_raw=skeleton_raw,
+                skeleton_norm=skeleton_norm,
+            )
+
+        segments_payload = {
+            "sign": self._serialize_segments(segment_result.recent_sign_segments),
+            "phrase": self._serialize_segments(segment_result.recent_phrase_segments),
+        }
+        bio_debug = {
+            "enabled": True,
+            "window": int(cfg.segmentation_window),
+            "step": int(cfg.segmentation_step),
+            "min_len": int(cfg.segmentation_min_len),
+            "merge_gap": int(cfg.segmentation_merge_gap),
+            "th_B_sign": float(self.pose_segmenter.sign_th_b),
+            "th_O_sign": float(self.pose_segmenter.sign_th_o),
+            "th_B_phrase": float(self.pose_segmenter.phrase_th_b),
+            "th_O_phrase": float(self.pose_segmenter.phrase_th_o),
+            "buffer_len": int(segment_result.buffer_len),
+            "buffer_start": int(segment_result.buffer_start),
+            "buffer_end": int(segment_result.buffer_end),
+            "active_sign": bool(segment_result.active_sign),
+            "active_phrase": bool(segment_result.active_phrase),
+            "active_sign_progress": float(segment_result.active_sign_progress),
+            "active_phrase_progress": float(segment_result.active_phrase_progress),
+        }
+
+        if not segment_result.sign_segments:
+            if segment_result.active_sign:
+                hold_target = max(1, int(cfg.segmentation_min_len))
+                hold_elapsed = int(round(float(segment_result.active_sign_progress) * hold_target))
+                payload = build_inference_message(
+                    status="HOLD",
+                    letter="NONE",
+                    word="NONE",
+                    score=0.0,
+                    confidence=0.0,
+                    hand_present=hand_present,
+                    bbox_norm=[0.0, 0.0, 0.0, 0.0],
+                    hold_elapsed_ms=hold_elapsed,
+                    hold_target_ms=hold_target,
+                    text_value=self.pose_word_decoder.text_value,
+                    committed_now=False,
+                    topk=[],
+                    vlm=VLMDecision(),
+                    sim1=0.0,
+                    sim2=0.0,
+                    margin=0.0,
+                    uncertain=False,
+                    cooldown_left_ms=0,
+                    mode="pose_words",
+                    hold_unit="segments",
+                    latency_ms=segment_result.latency_ms,
+                    fp_per_minute=self.pose_word_metrics.fp_per_minute(),
+                    avg_infer_latency_ms=self.pose_word_metrics.latency_summary().avg_ms,
+                    p95_infer_latency_ms=self.pose_word_metrics.latency_summary().p95_ms,
+                )
+                payload["timestamp_ms"] = int(now_ms)
+                payload["skeleton"] = {"raw": skeleton_raw, "norm": skeleton_norm}
+                payload["segments"] = segments_payload
+                payload.setdefault("debug", {})["bio"] = bio_debug
+                return payload
+
+            return self._none_pose_message(
+                now_ms=now_ms,
+                hand_present=hand_present,
+                skeleton_raw=skeleton_raw,
+                skeleton_norm=skeleton_norm,
+                segments=segments_payload,
+                bio_debug=bio_debug,
+            )
+
+        decoded = None
+        topk_pairs: list[tuple[str, float]] = []
+        total_latency_ms = float(segment_result.latency_ms or 0.0)
+
+        if segment_result.latency_ms is not None:
+            self.pose_word_metrics.record_inference(float(segment_result.latency_ms))
+
+        for seg in segment_result.sign_segments:
+            seg_feats = self.pose_segmenter.get_feature_span(seg.start, seg.end)
+            if seg_feats is None or seg_feats.shape[0] == 0:
+                continue
+            clip = self._resample_feature_clip(seg_feats, cfg.pose_word_clip_frames)
+            probs, cls_latency = self.pose_word_model.infer_probs(clip)
+            total_latency_ms += float(cls_latency)
+            self.pose_word_metrics.record_inference(float(cls_latency))
+            decoded = self.pose_word_decoder.update(
+                probs=probs,
+                labels=self.pose_word_model.labels,
+                topk=cfg.pose_word_topk,
+                no_event_index=self.pose_no_event_index,
+            )
+            topk_pairs = [(self.pose_word_model.labels[i], float(probs[i])) for i in decoded.topk_indices]
+
+        if decoded is None:
+            return self._none_pose_message(
+                now_ms=now_ms,
+                hand_present=hand_present,
+                skeleton_raw=skeleton_raw,
+                skeleton_norm=skeleton_norm,
+                segments=segments_payload,
+                bio_debug=bio_debug,
+            )
+
+        committed_word = decoded.committed_word if decoded.committed else None
+        self.pose_word_metrics.record_state(
+            timestamp_ms=int(now_ms),
+            state=decoded.state,
+            committed_word=committed_word,
+        )
+        latency_summary = self.pose_word_metrics.latency_summary()
+
+        topk_items = [TopKItem(letter=label, score=score, exemplar_path="") for label, score in topk_pairs]
+        payload = build_inference_message(
+            status=decoded.state,
+            letter=decoded.top1_label,
+            word=decoded.top1_label,
+            score=float(decoded.top1_prob),
+            confidence=float(decoded.top1_prob),
+            hand_present=hand_present,
+            bbox_norm=[0.0, 0.0, 0.0, 0.0],
+            hold_elapsed_ms=int(decoded.hold_count),
+            hold_target_ms=int(max(1, decoded.hold_target)),
+            text_value=self.pose_word_decoder.text_value,
+            committed_now=bool(decoded.committed),
+            topk=topk_items,
+            vlm=VLMDecision(),
+            sim1=float(decoded.top1_prob),
+            sim2=float(decoded.top2_prob),
+            margin=float(decoded.margin),
+            uncertain=decoded.state == "UNKNOWN",
+            cooldown_left_ms=int(decoded.cooldown_left),
+            mode="pose_words",
+            hold_unit="segments",
+            latency_ms=float(total_latency_ms),
+            fp_per_minute=self.pose_word_metrics.fp_per_minute(),
+            avg_infer_latency_ms=latency_summary.avg_ms,
+            p95_infer_latency_ms=latency_summary.p95_ms,
+        )
+        payload["timestamp_ms"] = int(now_ms)
+        payload["skeleton"] = {"raw": skeleton_raw, "norm": skeleton_norm}
+        payload["segments"] = segments_payload
+        payload.setdefault("debug", {})["bio"] = bio_debug
+        payload["top1"] = {
+            "label": decoded.top1_label,
+            "prob": float(decoded.top1_prob),
+            "no_event_prob": float(decoded.no_event_prob),
+        }
+        payload["state_detail"] = {
+            "hold_segments": int(decoded.hold_count),
+            "hold_target_segments": int(decoded.hold_target),
+            "hold_progress": float(decoded.hold_progress),
+            "cooldown_left_segments": int(decoded.cooldown_left),
+        }
+        return payload
 
     def _none_words_message(self, *, now_ms: int, error: str = "", hand_present: bool = False) -> dict[str, Any]:
         text_value = ""
@@ -478,6 +985,9 @@ class SessionProcessor:
 
     def process_frame(self, frame_bgr: np.ndarray, now_ms: int) -> dict[str, Any]:
         cfg = self.runtime.config
+        if self.recognition_mode == "pose_words":
+            return self._process_pose_words(frame_bgr, now_ms)
+
         if self.recognition_mode == "words":
             if self.words_service is None:
                 return self._none_words_message(now_ms=now_ms, error=self.words_init_error or "words service unavailable")

@@ -10,6 +10,34 @@ import yaml
 @dataclass
 class AppConfig:
     recognition_mode: str = "letters"
+    use_shoulder_norm: bool = True
+    use_hands_3d_norm: bool = False
+    segmentation_enabled: bool = False
+    segmentation_model_path: str = "backend/artifacts/bio_segmenter.onnx"
+    segmentation_thresholds_path: str = "backend/artifacts/bio_thresholds.json"
+    segmentation_window: int = 256
+    segmentation_step: int = 8
+    segmentation_min_len: int = 6
+    segmentation_merge_gap: int = 2
+    segmentation_max_buffer: int = 512
+    segmentation_ort_num_threads: int = 1
+    segmentation_sign_th_b: float = 0.5
+    segmentation_sign_th_o: float = 0.5
+    segmentation_phrase_th_b: float = 0.5
+    segmentation_phrase_th_o: float = 0.5
+    pose_word_model_path: str = "backend/artifacts/pose_word_model.onnx"
+    pose_word_labels_path: str = "backend/artifacts/pose_word_labels.txt"
+    pose_word_clip_frames: int = 32
+    pose_word_topk: int = 5
+    pose_word_no_event_label: str = "_no_event"
+    pose_word_th_no_event: float = 0.60
+    pose_word_th_unknown: float = 0.55
+    pose_word_th_margin: float = 0.10
+    pose_word_ema_alpha: float = 0.3
+    pose_word_hold_segments: int = 2
+    pose_word_cooldown_segments: int = 2
+    pose_word_dedup_same_word: bool = True
+    pose_word_ort_num_threads: int = 1
     frontend_fps: int = 12
     jpeg_quality: float = 0.75
     hold_ms: int = 700
@@ -130,6 +158,48 @@ class AppConfig:
                     "path": "word_runtime_log_path",
                 },
             ),
+            (
+                "segmentation",
+                {
+                    "enabled": "segmentation_enabled",
+                    "model_path": "segmentation_model_path",
+                    "thresholds_path": "segmentation_thresholds_path",
+                    "window": "segmentation_window",
+                    "step": "segmentation_step",
+                    "min_len": "segmentation_min_len",
+                    "merge_gap": "segmentation_merge_gap",
+                    "max_buffer": "segmentation_max_buffer",
+                    "ort_num_threads": "segmentation_ort_num_threads",
+                },
+            ),
+            (
+                "pose_word_model",
+                {
+                    "path": "pose_word_model_path",
+                    "labels_path": "pose_word_labels_path",
+                    "clip_frames": "pose_word_clip_frames",
+                    "topk": "pose_word_topk",
+                    "ort_num_threads": "pose_word_ort_num_threads",
+                },
+            ),
+            (
+                "pose_word_thresholds",
+                {
+                    "no_event_label": "pose_word_no_event_label",
+                    "th_no_event": "pose_word_th_no_event",
+                    "th_unknown": "pose_word_th_unknown",
+                    "th_margin": "pose_word_th_margin",
+                },
+            ),
+            (
+                "pose_word_commit_logic",
+                {
+                    "ema_alpha": "pose_word_ema_alpha",
+                    "hold_segments": "pose_word_hold_segments",
+                    "cooldown_segments": "pose_word_cooldown_segments",
+                    "dedup_same_word": "pose_word_dedup_same_word",
+                },
+            ),
         ]
 
         for section_name, mapping in sections:
@@ -148,9 +218,20 @@ class AppConfig:
         filtered = {k: v for k, v in raw.items() if k in known}
         cfg = cls(**filtered)
         cfg.recognition_mode = str(cfg.recognition_mode).strip().lower() or "letters"
-        if cfg.recognition_mode not in {"letters", "words"}:
+        if cfg.recognition_mode not in {"letters", "words", "pose_words"}:
             cfg.recognition_mode = "letters"
         cfg.letters_allowlist = cfg.letters_allowlist or []
+        cfg.segmentation_window = max(8, int(cfg.segmentation_window))
+        cfg.segmentation_step = max(1, int(cfg.segmentation_step))
+        cfg.segmentation_min_len = max(1, int(cfg.segmentation_min_len))
+        cfg.segmentation_merge_gap = max(0, int(cfg.segmentation_merge_gap))
+        cfg.segmentation_max_buffer = max(cfg.segmentation_window, int(cfg.segmentation_max_buffer))
+        cfg.segmentation_ort_num_threads = max(1, int(cfg.segmentation_ort_num_threads))
+        cfg.pose_word_clip_frames = max(4, int(cfg.pose_word_clip_frames))
+        cfg.pose_word_topk = max(1, int(cfg.pose_word_topk))
+        cfg.pose_word_hold_segments = max(1, int(cfg.pose_word_hold_segments))
+        cfg.pose_word_cooldown_segments = max(0, int(cfg.pose_word_cooldown_segments))
+        cfg.pose_word_ort_num_threads = max(1, int(cfg.pose_word_ort_num_threads))
         try:
             cfg.word_mean = tuple(float(x) for x in cfg.word_mean)  # type: ignore[assignment]
             cfg.word_std = tuple(float(x) for x in cfg.word_std)  # type: ignore[assignment]
