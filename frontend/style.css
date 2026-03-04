@@ -200,8 +200,8 @@ button:disabled {
 
 .panel-column {
   min-height: 0;
-  display: grid;
-  grid-template-rows: auto auto 1fr;
+  display: flex;
+  flex-direction: column;
   gap: 14px;
 }
 
@@ -297,6 +297,62 @@ button:disabled {
   display: flex;
   flex-direction: column;
   gap: 10px;
+}
+
+.debug-panel {
+  display: grid;
+  gap: 10px;
+}
+
+.debug-grid {
+  display: grid;
+  gap: 6px 10px;
+  grid-template-columns: 1fr 1fr;
+}
+
+.timeline-wrap {
+  display: grid;
+  gap: 6px;
+}
+
+.segments-timeline {
+  position: relative;
+  width: 100%;
+  min-height: 38px;
+  border-radius: 10px;
+  border: 1px solid rgba(151, 174, 187, 0.35);
+  background: rgba(4, 10, 14, 0.52);
+  overflow: hidden;
+}
+
+.segments-timeline .tl-now {
+  position: absolute;
+  right: 0;
+  top: 0;
+  bottom: 0;
+  width: 2px;
+  background: rgba(255, 255, 255, 0.5);
+}
+
+.segments-timeline .tl-seg {
+  position: absolute;
+  top: 6px;
+  height: 12px;
+  border-radius: 5px;
+  background: rgba(118, 255, 176, 0.68);
+}
+
+.segments-timeline .tl-seg.commit {
+  background: rgba(255, 126, 154, 0.75);
+  box-shadow: 0 0 12px rgba(255, 126, 154, 0.4);
+}
+
+.segments-timeline .tl-commit-marker {
+  position: absolute;
+  top: 20px;
+  width: 2px;
+  height: 12px;
+  background: rgba(255, 194, 96, 0.92);
 }
 
 .sentence-caption {
@@ -431,6 +487,10 @@ button:disabled {
   }
 
   .metrics-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .debug-grid {
     grid-template-columns: 1fr;
   }
 

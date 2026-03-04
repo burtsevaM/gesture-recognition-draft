@@ -20,6 +20,18 @@ const committedWordsEl = document.getElementById('committedWords');
 const sentencesListEl = document.getElementById('sentencesList');
 const topkEl = document.getElementById('topk');
 const debugEl = document.getElementById('debug');
+const dbgModeEl = document.getElementById('dbgMode');
+const dbgLatencyEl = document.getElementById('dbgLatency');
+const dbgFpsCamEl = document.getElementById('dbgFpsCam');
+const dbgFpsInEl = document.getElementById('dbgFpsIn');
+const dbgFpsPoseEl = document.getElementById('dbgFpsPose');
+const dbgFpsTotalEl = document.getElementById('dbgFpsTotal');
+const dbgSegEnabledEl = document.getElementById('dbgSegEnabled');
+const dbgWinStepEl = document.getElementById('dbgWinStep');
+const dbgThEl = document.getElementById('dbgTh');
+const dbgMinMergeEl = document.getElementById('dbgMinMerge');
+const dbgLastSegEl = document.getElementById('dbgLastSeg');
+const segmentsTimelineEl = document.getElementById('segmentsTimeline');
 
 const vlmUsedEl = document.getElementById('vlmUsed');
 const vlmLetterEl = document.getElementById('vlmLetter');
@@ -69,6 +81,15 @@ let recognitionMode = 'letters';
 let committedTokens = [];
 let lastCommitToken = '';
 let lastCommitAtMs = 0;
+let cameraFps = 0;
+let cameraFpsCounter = 0;
+let cameraFpsWindowStartMs = 0;
+let lastServerPerf = null;
+let segmentCommitFlashUntilMs = 0;
+let segmentHistory = [];
+let segmentEventSeen = new Set();
+let lastSegmentInfoText = 'none';
+const TIMELINE_WINDOW_MS = 8000;
 
 const captureCanvas = document.createElement('canvas');
 const captureCtx = captureCanvas.getContext('2d');
@@ -352,9 +373,120 @@ function drawSkeletonOverlay(data) {
   return drawn;
 }
 
+function captureSegmentEvents(data) {
+  const nowMs = Date.now();
+  const segments = Array.isArray(data?.segments?.sign) ? data.segments.sign : [];
+  for (const seg of segments) {
+    const start = Number(seg.start);
+    const end = Number(seg.end);
+    const score = Number(seg.score || 0);
+    if (!Number.isFinite(start) || !Number.isFinite(end)) continue;
+    const key = `${start}:${end}`;
+    if (segmentEventSeen.has(key)) continue;
+    segmentEventSeen.add(key);
+    const len = Math.max(0, end - start + 1);
+    const event = {
+      key,
+      start,
+      end,
+      len,
+      score,
+      ts: nowMs,
+      committed: false,
+    };
+    segmentHistory.push(event);
+    lastSegmentInfoText = `start=${start} end=${end} len=${len} score=${score.toFixed(3)}`;
+  }
+
+  const status = String(data?.status || '').toUpperCase();
+  const committed = status === 'COMMIT' || status === 'COMMITTED' || Boolean(data?.text_state?.committed);
+  if (committed) {
+    segmentCommitFlashUntilMs = nowMs + 420;
+    if (segmentHistory.length > 0) {
+      segmentHistory[segmentHistory.length - 1].committed = true;
+    }
+  }
+
+  segmentHistory = segmentHistory.filter((item) => (nowMs - item.ts) <= (TIMELINE_WINDOW_MS + 2000));
+}
+
+function renderSegmentsTimeline(nowMs = Date.now()) {
+  if (!segmentsTimelineEl) return;
+  segmentsTimelineEl.innerHTML = '';
+
+  const events = segmentHistory.filter((item) => (nowMs - item.ts) <= TIMELINE_WINDOW_MS);
+  for (const event of events) {
+    const ageStart = nowMs - event.ts;
+    const ageEnd = Math.max(0, ageStart - 250);
+    const left = Math.max(0, Math.min(1, 1 - (ageStart / TIMELINE_WINDOW_MS)));
+    const right = Math.max(0, Math.min(1, 1 - (ageEnd / TIMELINE_WINDOW_MS)));
+    const width = Math.max(0.008, right - left);
+
+    const bar = document.createElement('div');
+    bar.className = `tl-seg${event.committed ? ' commit' : ''}`;
+    bar.style.left = `${(left * 100).toFixed(2)}%`;
+    bar.style.width = `${(width * 100).toFixed(2)}%`;
+    bar.title = `start=${event.start} end=${event.end} len=${event.len} score=${event.score.toFixed(3)}`;
+    segmentsTimelineEl.appendChild(bar);
+
+    if (event.committed) {
+      const marker = document.createElement('div');
+      marker.className = 'tl-commit-marker';
+      marker.style.left = `${(right * 100).toFixed(2)}%`;
+      segmentsTimelineEl.appendChild(marker);
+    }
+  }
+
+  const nowLine = document.createElement('div');
+  nowLine.className = 'tl-now';
+  segmentsTimelineEl.appendChild(nowLine);
+}
+
+function updateDebugPanel(data) {
+  const perf = data?.perf || {};
+  const bio = data?.bio || data?.debug?.bio || {};
+  const mode = String(data?.mode || recognitionMode || 'letters');
+
+  if (dbgModeEl) dbgModeEl.textContent = mode;
+  if (dbgLatencyEl) {
+    const latency = Number(perf.latency_ms ?? data?.debug?.latency_ms);
+    dbgLatencyEl.textContent = Number.isFinite(latency) ? `${latency.toFixed(1)} ms` : 'n/a';
+  }
+  if (dbgFpsCamEl) dbgFpsCamEl.textContent = Number.isFinite(cameraFps) ? cameraFps.toFixed(1) : '0.0';
+  if (dbgFpsInEl) {
+    const v = Number(perf.fps_in);
+    dbgFpsInEl.textContent = Number.isFinite(v) ? v.toFixed(1) : '0.0';
+  }
+  if (dbgFpsPoseEl) {
+    const v = Number(perf.fps_pose);
+    dbgFpsPoseEl.textContent = Number.isFinite(v) ? v.toFixed(1) : '0.0';
+  }
+  if (dbgFpsTotalEl) {
+    const v = Number(perf.fps_total);
+    dbgFpsTotalEl.textContent = Number.isFinite(v) ? v.toFixed(1) : '0.0';
+  }
+  if (dbgSegEnabledEl) dbgSegEnabledEl.textContent = String(Boolean(bio.enabled));
+  if (dbgWinStepEl) {
+    const win = Number(bio.window);
+    const step = Number(bio.step);
+    dbgWinStepEl.textContent = (Number.isFinite(win) && Number.isFinite(step)) ? `${win} / ${step}` : 'n/a';
+  }
+  if (dbgThEl) {
+    const thB = Number(bio.th_B ?? bio.th_B_sign);
+    const thO = Number(bio.th_O ?? bio.th_O_sign);
+    dbgThEl.textContent = (Number.isFinite(thB) && Number.isFinite(thO)) ? `${thB.toFixed(2)} / ${thO.toFixed(2)}` : 'n/a';
+  }
+  if (dbgMinMergeEl) {
+    const minLen = Number(bio.min_len);
+    const mergeGap = Number(bio.merge_gap);
+    dbgMinMergeEl.textContent = (Number.isFinite(minLen) && Number.isFinite(mergeGap)) ? `${minLen} / ${mergeGap}` : 'n/a';
+  }
+  if (dbgLastSegEl) dbgLastSegEl.textContent = lastSegmentInfoText || 'none';
+}
+
 function drawSegmentsOverlay(data) {
   const segments = data?.segments;
-  const debugBio = data?.debug?.bio;
+  const debugBio = data?.bio || data?.debug?.bio;
   if (!segments && !debugBio) {
     return;
   }
@@ -410,6 +542,16 @@ function drawSegmentsOverlay(data) {
     ctx.strokeStyle = 'rgba(255, 126, 154, 0.85)';
     ctx.lineWidth = 2.5;
     ctx.strokeRect(8, 8, canvasEl.width - 16, canvasEl.height - 16);
+    ctx.restore();
+  }
+
+  if (Date.now() < segmentCommitFlashUntilMs) {
+    ctx.save();
+    ctx.fillStyle = 'rgba(255, 214, 138, 0.18)';
+    ctx.fillRect(0, 0, canvasEl.width, canvasEl.height);
+    ctx.fillStyle = 'rgba(255, 214, 138, 0.95)';
+    ctx.font = '700 18px "Avenir Next", sans-serif';
+    ctx.fillText('SEGMENT COMMIT', 14, canvasEl.height - 18);
     ctx.restore();
   }
 }
@@ -529,10 +671,20 @@ function stopCamera() {
   committedTokens = [];
   lastCommitToken = '';
   lastCommitAtMs = 0;
+  cameraFps = 0;
+  cameraFpsCounter = 0;
+  cameraFpsWindowStartMs = 0;
+  lastServerPerf = null;
+  segmentCommitFlashUntilMs = 0;
+  segmentHistory = [];
+  segmentEventSeen = new Set();
+  lastSegmentInfoText = 'none';
   statusEl.textContent = 'NONE';
   letterEl.textContent = 'NONE';
   textValueEl.textContent = 'NONE';
   renderSentencesPanel();
+  renderSegmentsTimeline(Date.now());
+  updateDebugPanel({ mode: 'letters', perf: {}, bio: { enabled: false } });
 }
 
 function connectWs() {
@@ -599,6 +751,22 @@ function startSender() {
 function renderLoop() {
   if (!stream) return;
 
+  const nowMs = Date.now();
+  cameraFpsCounter += 1;
+  if (!cameraFpsWindowStartMs) {
+    cameraFpsWindowStartMs = nowMs;
+  } else {
+    const dt = nowMs - cameraFpsWindowStartMs;
+    if (dt >= 1000) {
+      cameraFps = (cameraFpsCounter * 1000) / dt;
+      cameraFpsCounter = 0;
+      cameraFpsWindowStartMs = nowMs;
+      if (lastServerPerf) {
+        updateDebugPanel(lastServerPerf);
+      }
+    }
+  }
+
   ctx.clearRect(0, 0, canvasEl.width, canvasEl.height);
 
   const stateFresh = Date.now() - lastStateAtMs < 800;
@@ -624,13 +792,17 @@ function renderLoop() {
     drawSegmentsOverlay(latest);
   }
 
+  renderSegmentsTimeline(nowMs);
+
   renderReq = requestAnimationFrame(renderLoop);
 }
 
 function renderState(data) {
   const mode = String(data.mode || recognitionMode || 'letters');
   recognitionMode = mode;
+  lastServerPerf = data;
   appendCommitToken(data, mode);
+  captureSegmentEvents(data);
   tokenLabelEl.textContent = mode === 'words' ? 'Слово' : (mode === 'pose_words' ? 'Поза' : 'Буква');
 
   setStatusClass(data.status);
@@ -664,16 +836,20 @@ function renderState(data) {
   }
 
   const dbg = data.debug || {};
-  const latency = dbg.latency_ms === null || dbg.latency_ms === undefined ? 'n/a' : Number(dbg.latency_ms).toFixed(1);
+  const perf = data.perf || {};
+  const latencyRaw = perf.latency_ms ?? dbg.latency_ms;
+  const latency = latencyRaw === null || latencyRaw === undefined ? 'n/a' : Number(latencyRaw).toFixed(1);
   const fpMin = dbg.fp_per_minute === null || dbg.fp_per_minute === undefined ? 'n/a' : Number(dbg.fp_per_minute).toFixed(2);
   const avgLat = dbg.avg_infer_latency_ms === null || dbg.avg_infer_latency_ms === undefined ? 'n/a' : Number(dbg.avg_infer_latency_ms).toFixed(1);
   const p95Lat = dbg.p95_infer_latency_ms === null || dbg.p95_infer_latency_ms === undefined ? 'n/a' : Number(dbg.p95_infer_latency_ms).toFixed(1);
-  const bio = dbg.bio || {};
+  const bio = data.bio || dbg.bio || {};
   const seg = data.segments || {};
   const signSegCount = Array.isArray(seg.sign) ? seg.sign.length : 0;
   const phraseSegCount = Array.isArray(seg.phrase) ? seg.phrase.length : 0;
   const bioActive = Boolean(bio.active_sign);
   debugEl.textContent = `sim1=${Number(dbg.sim1 || 0).toFixed(3)} | sim2=${Number(dbg.sim2 || 0).toFixed(3)} | margin=${Number(dbg.margin || 0).toFixed(3)} | uncertain=${Boolean(dbg.uncertain)} | cooldown=${dbg.cooldown_left_ms || 0}${holdUnit === 'frames' ? 'fr' : 'мс'} | latency=${latency}ms | fp/min=${fpMin} | avg=${avgLat}ms p95=${p95Lat}ms | seg(sign=${signSegCount}, phrase=${phraseSegCount}, active=${bioActive})`;
+  updateDebugPanel(data);
+  renderSegmentsTimeline(Date.now());
 
   const vlm = data.vlm || {};
   vlmUsedEl.textContent = String(Boolean(vlm.used));
@@ -699,3 +875,5 @@ window.addEventListener('beforeunload', () => {
 });
 
 renderSentencesPanel();
+renderSegmentsTimeline(Date.now());
+updateDebugPanel({ mode: recognitionMode, perf: {}, bio: { enabled: false } });

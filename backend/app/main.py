@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import time
+from collections import deque
 from concurrent.futures import Future, ThreadPoolExecutor
 from pathlib import Path
 from threading import Lock
@@ -346,6 +347,10 @@ class SessionProcessor:
         self.pose_word_metrics: WordRuntimeMetrics = WordRuntimeMetrics()
         self.pose_no_event_index: int | None = None
         self.pose_init_error: str | None = None
+        self.pose_in_timestamps_ms: deque[int] = deque(maxlen=180)
+        self.pose_out_timestamps_ms: deque[int] = deque(maxlen=180)
+        self.pose_process_ms_ema: float = 0.0
+        self.pose_last_segment_event: dict[str, Any] | None = None
         if self.recognition_mode == "words":
             model = runtime.get_word_model()
             if model is None:
@@ -502,6 +507,70 @@ class SessionProcessor:
             for seg in segments
         ]
 
+    @staticmethod
+    def _compute_fps(timestamps_ms: deque[int]) -> float:
+        if len(timestamps_ms) < 2:
+            return 0.0
+        first = int(timestamps_ms[0])
+        last = int(timestamps_ms[-1])
+        dt_ms = max(1, last - first)
+        return float((len(timestamps_ms) - 1) * 1000.0 / dt_ms)
+
+    def _current_bio_payload(self, cfg: AppConfig, bio_debug: dict[str, Any] | None = None) -> dict[str, Any]:
+        cfg_th_b = float(getattr(cfg, "segmentation_sign_th_b", 0.5))
+        cfg_th_o = float(getattr(cfg, "segmentation_sign_th_o", 0.5))
+        th_b = float(getattr(self.pose_segmenter, "sign_th_b", cfg_th_b)) if self.pose_segmenter else cfg_th_b
+        th_o = float(getattr(self.pose_segmenter, "sign_th_o", cfg_th_o)) if self.pose_segmenter else cfg_th_o
+        payload = {
+            "enabled": bool(getattr(cfg, "segmentation_enabled", False)),
+            "th_B": th_b,
+            "th_O": th_o,
+            "window": int(getattr(cfg, "segmentation_window", 0)),
+            "step": int(getattr(cfg, "segmentation_step", 0)),
+            "min_len": int(getattr(cfg, "segmentation_min_len", 0)),
+            "merge_gap": int(getattr(cfg, "segmentation_merge_gap", 0)),
+        }
+        if bio_debug:
+            payload["index_mode"] = bio_debug.get("index_mode", "global")
+            payload["max_len"] = int(bio_debug.get("max_len", getattr(cfg, "segmentation_max_len", 0)))
+            payload["cool_off_frames"] = int(
+                bio_debug.get("cool_off_frames", getattr(cfg, "segmentation_cool_off_frames", 0))
+            )
+        return payload
+
+    def _finalize_pose_payload(
+        self,
+        *,
+        payload: dict[str, Any],
+        now_ms: int,
+        started_s: float,
+        bio_debug: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        cfg = self.runtime.config
+        self.pose_out_timestamps_ms.append(int(now_ms))
+        process_ms = max(0.0, (time.perf_counter() - started_s) * 1000.0)
+        if self.pose_process_ms_ema <= 0.0:
+            self.pose_process_ms_ema = process_ms
+        else:
+            self.pose_process_ms_ema = (self.pose_process_ms_ema * 0.8) + (process_ms * 0.2)
+
+        payload_latency = payload.get("debug", {}).get("latency_ms")
+        latency_ms = float(payload_latency) if isinstance(payload_latency, (int, float)) else float(process_ms)
+        fps_in = self._compute_fps(self.pose_in_timestamps_ms)
+        fps_total = self._compute_fps(self.pose_out_timestamps_ms)
+        fps_pose = float(1000.0 / self.pose_process_ms_ema) if self.pose_process_ms_ema > 1e-6 else 0.0
+
+        payload["perf"] = {
+            "latency_ms": float(latency_ms),
+            "fps_in": float(fps_in),
+            "fps_pose": float(fps_pose),
+            "fps_total": float(fps_total),
+        }
+        payload["bio"] = self._current_bio_payload(cfg, bio_debug=bio_debug)
+        if self.pose_last_segment_event is not None:
+            payload["segment_event"] = dict(self.pose_last_segment_event)
+        return payload
+
     def _none_pose_message(
         self,
         *,
@@ -559,11 +628,17 @@ class SessionProcessor:
 
     def _process_pose_words(self, frame_bgr: np.ndarray, now_ms: int) -> dict[str, Any]:
         cfg = self.runtime.config
+        started_s = time.perf_counter()
+        self.pose_in_timestamps_ms.append(int(now_ms))
         extractor = self.runtime.get_pose_extractor()
         if extractor is None:
-            return self._none_pose_message(
+            return self._finalize_pose_payload(
+                payload=self._none_pose_message(
                 now_ms=now_ms,
                 error=self.runtime.errors.get("pose_extractor", "pose extractor is unavailable"),
+                ),
+                now_ms=now_ms,
+                started_s=started_s,
             )
 
         if cv2 is not None:
@@ -574,10 +649,18 @@ class SessionProcessor:
         try:
             pose_frame = extractor.process(frame_rgb)
         except Exception as exc:
-            return self._none_pose_message(now_ms=now_ms, error=f"pose extraction error: {exc}")
+            return self._finalize_pose_payload(
+                payload=self._none_pose_message(now_ms=now_ms, error=f"pose extraction error: {exc}"),
+                now_ms=now_ms,
+                started_s=started_s,
+            )
 
         if pose_frame is None:
-            return self._none_pose_message(now_ms=now_ms)
+            return self._finalize_pose_payload(
+                payload=self._none_pose_message(now_ms=now_ms),
+                now_ms=now_ms,
+                started_s=started_s,
+            )
 
         norm_frame = self._normalize_pose_frame(pose_frame)
         hand_present = bool(norm_frame.left_hand is not None or norm_frame.right_hand is not None)
@@ -608,15 +691,19 @@ class SessionProcessor:
             )
             payload["timestamp_ms"] = int(now_ms)
             payload["skeleton"] = {"raw": skeleton_raw, "norm": skeleton_norm}
-            return payload
+            return self._finalize_pose_payload(payload=payload, now_ms=now_ms, started_s=started_s)
 
         if self.pose_segmenter is None or self.pose_word_model is None or self.pose_word_decoder is None:
-            return self._none_pose_message(
+            return self._finalize_pose_payload(
+                payload=self._none_pose_message(
                 now_ms=now_ms,
                 error=self.pose_init_error or "pose_words segmentation runtime is unavailable",
                 hand_present=hand_present,
                 skeleton_raw=skeleton_raw,
                 skeleton_norm=skeleton_norm,
+                ),
+                now_ms=now_ms,
+                started_s=started_s,
             )
 
         feature_vec, _ = compose_features(
@@ -630,12 +717,16 @@ class SessionProcessor:
         try:
             segment_result = self.pose_segmenter.update(feature_vec)
         except Exception as exc:
-            return self._none_pose_message(
+            return self._finalize_pose_payload(
+                payload=self._none_pose_message(
                 now_ms=now_ms,
                 error=f"segmentation error: {exc}",
                 hand_present=hand_present,
                 skeleton_raw=skeleton_raw,
                 skeleton_norm=skeleton_norm,
+                ),
+                now_ms=now_ms,
+                started_s=started_s,
             )
 
         segments_payload = {
@@ -663,6 +754,15 @@ class SessionProcessor:
             "active_sign_progress": float(segment_result.active_sign_progress),
             "active_phrase_progress": float(segment_result.active_phrase_progress),
         }
+        if segment_result.sign_segments:
+            latest_seg = segment_result.sign_segments[-1]
+            self.pose_last_segment_event = {
+                "start": int(latest_seg.start),
+                "end": int(latest_seg.end),
+                "len": int(max(0, latest_seg.end - latest_seg.start + 1)),
+                "score": float(latest_seg.score),
+                "timestamp_ms": int(now_ms),
+            }
 
         if not segment_result.sign_segments:
             if segment_result.active_sign:
@@ -698,14 +798,19 @@ class SessionProcessor:
                 payload["skeleton"] = {"raw": skeleton_raw, "norm": skeleton_norm}
                 payload["segments"] = segments_payload
                 payload.setdefault("debug", {})["bio"] = bio_debug
-                return payload
+                return self._finalize_pose_payload(payload=payload, now_ms=now_ms, started_s=started_s, bio_debug=bio_debug)
 
-            return self._none_pose_message(
+            return self._finalize_pose_payload(
+                payload=self._none_pose_message(
                 now_ms=now_ms,
                 hand_present=hand_present,
                 skeleton_raw=skeleton_raw,
                 skeleton_norm=skeleton_norm,
                 segments=segments_payload,
+                bio_debug=bio_debug,
+                ),
+                now_ms=now_ms,
+                started_s=started_s,
                 bio_debug=bio_debug,
             )
 
@@ -733,12 +838,17 @@ class SessionProcessor:
             topk_pairs = [(self.pose_word_model.labels[i], float(probs[i])) for i in decoded.topk_indices]
 
         if decoded is None:
-            return self._none_pose_message(
+            return self._finalize_pose_payload(
+                payload=self._none_pose_message(
                 now_ms=now_ms,
                 hand_present=hand_present,
                 skeleton_raw=skeleton_raw,
                 skeleton_norm=skeleton_norm,
                 segments=segments_payload,
+                bio_debug=bio_debug,
+                ),
+                now_ms=now_ms,
+                started_s=started_s,
                 bio_debug=bio_debug,
             )
 
@@ -792,7 +902,7 @@ class SessionProcessor:
             "hold_progress": float(decoded.hold_progress),
             "cooldown_left_segments": int(decoded.cooldown_left),
         }
-        return payload
+        return self._finalize_pose_payload(payload=payload, now_ms=now_ms, started_s=started_s, bio_debug=bio_debug)
 
     def _none_words_message(self, *, now_ms: int, error: str = "", hand_present: bool = False) -> dict[str, Any]:
         text_value = ""

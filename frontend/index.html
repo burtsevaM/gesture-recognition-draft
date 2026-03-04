@@ -77,7 +77,28 @@
           <div class="progress"><div id="progressBar"></div></div>
         </section>
 
-        <section class="module reveal reveal-4 text-module">
+        <section class="module reveal reveal-4 debug-panel">
+          <h2>BIO Debug</h2>
+          <div class="debug-grid">
+            <div class="kv"><span>Mode</span><strong id="dbgMode">n/a</strong></div>
+            <div class="kv"><span>Latency</span><strong id="dbgLatency">n/a</strong></div>
+            <div class="kv"><span>FPS (Camera)</span><strong id="dbgFpsCam">0.0</strong></div>
+            <div class="kv"><span>FPS In</span><strong id="dbgFpsIn">0.0</strong></div>
+            <div class="kv"><span>FPS Pose</span><strong id="dbgFpsPose">0.0</strong></div>
+            <div class="kv"><span>FPS Total</span><strong id="dbgFpsTotal">0.0</strong></div>
+            <div class="kv"><span>Segmentation</span><strong id="dbgSegEnabled">false</strong></div>
+            <div class="kv"><span>Window / Step</span><strong id="dbgWinStep">n/a</strong></div>
+            <div class="kv"><span>th_B / th_O</span><strong id="dbgTh">n/a</strong></div>
+            <div class="kv"><span>min_len / merge_gap</span><strong id="dbgMinMerge">n/a</strong></div>
+            <div class="kv"><span>Last Segment</span><strong id="dbgLastSeg">none</strong></div>
+          </div>
+          <div class="timeline-wrap">
+            <div class="small">Segments Timeline (last 8s)</div>
+            <div id="segmentsTimeline" class="segments-timeline"></div>
+          </div>
+        </section>
+
+        <section class="module reveal reveal-5 text-module">
           <h2>Текущий результат</h2>
           <div id="textValue" class="text-value">NONE</div>
         </section>
