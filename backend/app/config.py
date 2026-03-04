@@ -18,7 +18,9 @@ class AppConfig:
     segmentation_window: int = 256
     segmentation_step: int = 8
     segmentation_min_len: int = 6
+    segmentation_max_len: int = 150
     segmentation_merge_gap: int = 2
+    segmentation_cool_off_frames: int = 4
     segmentation_max_buffer: int = 512
     segmentation_ort_num_threads: int = 1
     segmentation_sign_th_b: float = 0.5
@@ -167,7 +169,9 @@ class AppConfig:
                     "window": "segmentation_window",
                     "step": "segmentation_step",
                     "min_len": "segmentation_min_len",
+                    "max_len": "segmentation_max_len",
                     "merge_gap": "segmentation_merge_gap",
+                    "cool_off_frames": "segmentation_cool_off_frames",
                     "max_buffer": "segmentation_max_buffer",
                     "ort_num_threads": "segmentation_ort_num_threads",
                 },
@@ -224,7 +228,9 @@ class AppConfig:
         cfg.segmentation_window = max(8, int(cfg.segmentation_window))
         cfg.segmentation_step = max(1, int(cfg.segmentation_step))
         cfg.segmentation_min_len = max(1, int(cfg.segmentation_min_len))
+        cfg.segmentation_max_len = max(cfg.segmentation_min_len, int(cfg.segmentation_max_len))
         cfg.segmentation_merge_gap = max(0, int(cfg.segmentation_merge_gap))
+        cfg.segmentation_cool_off_frames = max(0, int(cfg.segmentation_cool_off_frames))
         cfg.segmentation_max_buffer = max(cfg.segmentation_window, int(cfg.segmentation_max_buffer))
         cfg.segmentation_ort_num_threads = max(1, int(cfg.segmentation_ort_num_threads))
         cfg.pose_word_clip_frames = max(4, int(cfg.pose_word_clip_frames))

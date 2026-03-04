@@ -55,6 +55,7 @@ def decode_segments(
     th_B: float,
     th_O: float,
     min_len: int = 1,
+    max_len: int | None = None,
     merge_gap: int = 0,
 ) -> list[tuple[int, int, float]]:
     """Decode per-frame BIO probabilities to (start, end, score) segments.
@@ -71,6 +72,7 @@ def decode_segments(
     th_b = float(th_B)
     th_o = float(th_O)
     min_len = max(1, int(min_len))
+    max_len = max(1, int(max_len)) if max_len is not None else None
 
     raw_segments: list[tuple[int, int]] = []
     active = False
@@ -102,7 +104,13 @@ def decode_segments(
     merged_segments = _merge_with_gap(raw_segments, int(merge_gap))
     output: list[tuple[int, int, float]] = []
     for seg_start, seg_end in merged_segments:
-        if (seg_end - seg_start + 1) < min_len:
+        seg_len = seg_end - seg_start + 1
+        if seg_len < min_len:
+            continue
+        if max_len is not None and seg_len > max_len:
+            seg_start = int(seg_end - max_len + 1)
+            seg_len = max_len
+        if seg_len < min_len:
             continue
         output.append((int(seg_start), int(seg_end), _segment_score(p, seg_start, seg_end)))
     return output

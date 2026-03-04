@@ -80,7 +80,9 @@ segmentation:
   window: 256
   step: 8
   min_len: 6
+  max_len: 150
   merge_gap: 2
+  cool_off_frames: 4
   max_buffer: 512
   ort_num_threads: 1
 pose_word_model:

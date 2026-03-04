@@ -75,7 +75,9 @@ segmentation:
   window: 192
   step: 6
   min_len: 5
+  max_len: 120
   merge_gap: 1
+  cool_off_frames: 3
   max_buffer: 384
 pose_word_model:
   path: backend/artifacts/pose_word_model.onnx
@@ -101,7 +103,9 @@ pose_word_commit_logic:
     assert cfg.segmentation_window == 192
     assert cfg.segmentation_step == 6
     assert cfg.segmentation_min_len == 5
+    assert cfg.segmentation_max_len == 120
     assert cfg.segmentation_merge_gap == 1
+    assert cfg.segmentation_cool_off_frames == 3
     assert cfg.segmentation_max_buffer == 384
     assert cfg.pose_word_clip_frames == 24
     assert cfg.pose_word_topk == 7

@@ -24,6 +24,7 @@ from .hand_detector import HandDetection, HandDetector
 from .logging_utils import UncertainEventLogger
 from .pose import PoseExtractor, compose_features, hand_normalize_3d, shoulder_normalize
 from .pose.datatypes import PoseFrame, PoseLandmarksGroup
+from .pose_words import resample_to_fixed_T
 from .retrieval import GalleryIndex, RetrievalHit
 from .segmentation import (
     BioSegmenterOnnxModel,
@@ -392,7 +393,9 @@ class SessionProcessor:
                     window=cfg.segmentation_window,
                     step=cfg.segmentation_step,
                     min_len=cfg.segmentation_min_len,
+                    max_len=cfg.segmentation_max_len,
                     merge_gap=cfg.segmentation_merge_gap,
+                    cool_off_frames=cfg.segmentation_cool_off_frames,
                     sign_th_b=thresholds.sign_th_b if thresholds.sign_th_b > 0 else cfg.segmentation_sign_th_b,
                     sign_th_o=thresholds.sign_th_o if thresholds.sign_th_o > 0 else cfg.segmentation_sign_th_o,
                     phrase_th_b=thresholds.phrase_th_b if thresholds.phrase_th_b > 0 else cfg.segmentation_phrase_th_b,
@@ -487,25 +490,6 @@ class SessionProcessor:
             if frame.right_hand is not None:
                 frame.right_hand.points = hand_normalize_3d(frame.right_hand.points)
         return frame
-
-    @staticmethod
-    def _resample_feature_clip(features: np.ndarray, target_frames: int) -> np.ndarray:
-        arr = np.asarray(features, dtype=np.float32)
-        if arr.ndim != 2:
-            raise ValueError(f"segment features must have shape [T, F], got {arr.shape}")
-        if arr.shape[0] == 0:
-            raise ValueError("segment features are empty")
-        target = max(1, int(target_frames))
-        if arr.shape[0] == target:
-            return arr
-        if arr.shape[0] == 1:
-            return np.repeat(arr, repeats=target, axis=0).astype(np.float32)
-        source = np.linspace(0, arr.shape[0] - 1, num=arr.shape[0], dtype=np.float32)
-        target_x = np.linspace(0, arr.shape[0] - 1, num=target, dtype=np.float32)
-        out = np.zeros((target, arr.shape[1]), dtype=np.float32)
-        for feat_i in range(arr.shape[1]):
-            out[:, feat_i] = np.interp(target_x, source, arr[:, feat_i])
-        return out
 
     @staticmethod
     def _serialize_segments(segments: list[Any]) -> list[dict[str, float | int]]:
@@ -660,10 +644,13 @@ class SessionProcessor:
         }
         bio_debug = {
             "enabled": True,
+            "index_mode": str(segment_result.index_mode),
             "window": int(cfg.segmentation_window),
             "step": int(cfg.segmentation_step),
             "min_len": int(cfg.segmentation_min_len),
+            "max_len": int(cfg.segmentation_max_len),
             "merge_gap": int(cfg.segmentation_merge_gap),
+            "cool_off_frames": int(cfg.segmentation_cool_off_frames),
             "th_B_sign": float(self.pose_segmenter.sign_th_b),
             "th_O_sign": float(self.pose_segmenter.sign_th_o),
             "th_B_phrase": float(self.pose_segmenter.phrase_th_b),
@@ -733,7 +720,7 @@ class SessionProcessor:
             seg_feats = self.pose_segmenter.get_feature_span(seg.start, seg.end)
             if seg_feats is None or seg_feats.shape[0] == 0:
                 continue
-            clip = self._resample_feature_clip(seg_feats, cfg.pose_word_clip_frames)
+            clip = resample_to_fixed_T(seg_feats, T=cfg.pose_word_clip_frames, method="linear")
             probs, cls_latency = self.pose_word_model.infer_probs(clip)
             total_latency_ms += float(cls_latency)
             self.pose_word_metrics.record_inference(float(cls_latency))

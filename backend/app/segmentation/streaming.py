@@ -5,6 +5,7 @@ from dataclasses import dataclass, field
 
 import numpy as np
 
+from ..pose_words.segment_utils import extract_segment
 from .decoder import decode_segments
 from .model_onnx import BioSegmenterOnnxModel
 
@@ -38,9 +39,16 @@ class StreamingBioResult:
     buffer_len: int = 0
     buffer_start: int = 0
     buffer_end: int = -1
+    index_mode: str = "global"
 
 
 class StreamingBioSegmenter:
+    """Streaming BIO segmenter with global monotonic frame indices.
+
+    Segment indices (`start`, `end`) in results are always global frame indices,
+    not local buffer offsets.
+    """
+
     def __init__(
         self,
         *,
@@ -48,7 +56,9 @@ class StreamingBioSegmenter:
         window: int = 256,
         step: int = 8,
         min_len: int = 6,
+        max_len: int = 150,
         merge_gap: int = 2,
+        cool_off_frames: int = 0,
         sign_th_b: float = 0.5,
         sign_th_o: float = 0.5,
         phrase_th_b: float = 0.5,
@@ -59,7 +69,9 @@ class StreamingBioSegmenter:
         self.window = max(8, int(window))
         self.step = max(1, int(step))
         self.min_len = max(1, int(min_len))
+        self.max_len = max(self.min_len, int(max_len))
         self.merge_gap = max(0, int(merge_gap))
+        self.cool_off_frames = max(0, int(cool_off_frames))
         self.sign_th_b = float(sign_th_b)
         self.sign_th_o = float(sign_th_o)
         self.phrase_th_b = float(phrase_th_b)
@@ -149,6 +161,7 @@ class StreamingBioSegmenter:
             th_B=self.sign_th_b,
             th_O=self.sign_th_o,
             min_len=self.min_len,
+            max_len=self.max_len,
             merge_gap=self.merge_gap,
         )
         phrase_local = decode_segments(
@@ -156,6 +169,7 @@ class StreamingBioSegmenter:
             th_B=self.phrase_th_b,
             th_O=self.phrase_th_o,
             min_len=self.min_len,
+            max_len=self.max_len,
             merge_gap=self.merge_gap,
         )
 
@@ -178,6 +192,20 @@ class StreamingBioSegmenter:
 
         return sign_segments, phrase_segments, active_sign, active_phrase, sign_progress, phrase_progress
 
+    def _apply_cool_off(self, segments: list[BioSegment], last_end: int) -> tuple[list[BioSegment], int]:
+        if not segments:
+            return [], last_end
+        out: list[BioSegment] = []
+        cursor_end = int(last_end)
+        for seg in sorted(segments, key=lambda x: (x.end, x.start)):
+            if seg.end <= cursor_end:
+                continue
+            if cursor_end >= 0 and (seg.start - cursor_end - 1) < self.cool_off_frames:
+                continue
+            out.append(seg)
+            cursor_end = seg.end
+        return out, cursor_end
+
     def get_feature_span(self, start: int, end: int) -> np.ndarray | None:
         if not self._frame_indices:
             return None
@@ -190,14 +218,11 @@ class StreamingBioSegmenter:
         max_idx = int(self._frame_indices[-1])
         if start_i < min_idx or end_i > max_idx:
             return None
-
-        # Indices in streaming buffer are contiguous by construction.
-        begin = start_i - min_idx
-        finish = end_i - min_idx + 1
-        feats = list(self._features)[begin:finish]
-        if not feats:
+        feat_mat = np.stack(list(self._features), axis=0).astype(np.float32)
+        segment = extract_segment({"features": feat_mat, "start_idx": min_idx}, start_i, end_i)
+        if segment.shape[0] == 0:
             return None
-        return np.stack(feats, axis=0).astype(np.float32)
+        return segment
 
     def update(self, feature: np.ndarray) -> StreamingBioResult:
         self._append_feature(feature)
@@ -213,6 +238,7 @@ class StreamingBioSegmenter:
                 buffer_len=len(self._frame_indices),
                 buffer_start=start,
                 buffer_end=end,
+                index_mode="global",
             )
 
         should_run = self._frames_since_infer >= self.step
@@ -226,6 +252,7 @@ class StreamingBioSegmenter:
                 buffer_len=len(self._frame_indices),
                 buffer_start=start,
                 buffer_end=end,
+                index_mode="global",
             )
 
         self._frames_since_infer = 0
@@ -246,10 +273,8 @@ class StreamingBioSegmenter:
         new_sign = [seg for seg in completed_sign if seg.end > self._last_emitted_sign_end]
         new_phrase = [seg for seg in completed_phrase if seg.end > self._last_emitted_phrase_end]
 
-        if new_sign:
-            self._last_emitted_sign_end = max(self._last_emitted_sign_end, max(seg.end for seg in new_sign))
-        if new_phrase:
-            self._last_emitted_phrase_end = max(self._last_emitted_phrase_end, max(seg.end for seg in new_phrase))
+        new_sign, self._last_emitted_sign_end = self._apply_cool_off(new_sign, self._last_emitted_sign_end)
+        new_phrase, self._last_emitted_phrase_end = self._apply_cool_off(new_phrase, self._last_emitted_phrase_end)
 
         start = int(self._frame_indices[0]) if self._frame_indices else 0
         end = int(self._frame_indices[-1]) if self._frame_indices else -1
@@ -267,4 +292,5 @@ class StreamingBioSegmenter:
             buffer_len=len(self._frame_indices),
             buffer_start=start,
             buffer_end=end,
+            index_mode="global",
         )
