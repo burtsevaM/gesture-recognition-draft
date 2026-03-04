@@ -6,6 +6,8 @@ const startBtn = document.getElementById('startBtn');
 const stopBtn = document.getElementById('stopBtn');
 const rawSkeletonToggleEl = document.getElementById('rawSkeletonToggle');
 const normSkeletonToggleEl = document.getElementById('normSkeletonToggle');
+const inferenceLocationEl = document.getElementById('inferenceLocation');
+const inferenceStatusEl = document.getElementById('inferenceStatus');
 
 const statusEl = document.getElementById('status');
 const tokenLabelEl = document.getElementById('tokenLabel');
@@ -59,6 +61,11 @@ const HAND_EDGES = [
 ];
 
 const MIN_LANDMARK_CONF = 0.05;
+const INFERENCE_LOCATION_STORAGE_KEY = 'inference_location';
+const OFFLINE_MODEL_BASE = '/static/assets/models';
+const OFFLINE_WORD_MODEL_URL = `${OFFLINE_MODEL_BASE}/pose_word_model.onnx`;
+const OFFLINE_BIO_MODEL_URL = `${OFFLINE_MODEL_BASE}/bio_segmenter.onnx`;
+const OFFLINE_MANIFEST_URL = `${OFFLINE_MODEL_BASE}/manifest.json`;
 
 // Важно: датасет снят с зеркалом, поэтому live-кадр в распознавание тоже зеркалим.
 const MIRROR_STREAM = true;
@@ -89,6 +96,10 @@ let segmentCommitFlashUntilMs = 0;
 let segmentHistory = [];
 let segmentEventSeen = new Set();
 let lastSegmentInfoText = 'none';
+let inferenceLocation = 'backend';
+let effectiveInferenceLocation = 'backend';
+let browserInferenceBackend = null;
+let backendInferenceBackend = null;
 const TIMELINE_WINDOW_MS = 8000;
 
 const captureCanvas = document.createElement('canvas');
@@ -110,6 +121,107 @@ function applyMirrorStyles() {
   canvasEl.style.transform = transform;
   videoEl.style.transformOrigin = 'center center';
   canvasEl.style.transformOrigin = 'center center';
+}
+
+function normalizeInferenceLocation(value) {
+  return String(value || '').toLowerCase() === 'browser' ? 'browser' : 'backend';
+}
+
+function setInferenceStatus(text, tone = 'normal') {
+  if (!inferenceStatusEl) return;
+  inferenceStatusEl.textContent = String(text || '');
+  inferenceStatusEl.classList.remove('warn', 'ok', 'err');
+  if (tone === 'warn') inferenceStatusEl.classList.add('warn');
+  if (tone === 'ok') inferenceStatusEl.classList.add('ok');
+  if (tone === 'err') inferenceStatusEl.classList.add('err');
+}
+
+function syncInferenceSelector() {
+  if (!inferenceLocationEl) return;
+  inferenceLocationEl.value = normalizeInferenceLocation(inferenceLocation);
+}
+
+function loadInferencePreference() {
+  try {
+    inferenceLocation = normalizeInferenceLocation(localStorage.getItem(INFERENCE_LOCATION_STORAGE_KEY));
+  } catch (err) {
+    inferenceLocation = 'backend';
+  }
+  syncInferenceSelector();
+}
+
+function saveInferencePreference(value) {
+  inferenceLocation = normalizeInferenceLocation(value);
+  try {
+    localStorage.setItem(INFERENCE_LOCATION_STORAGE_KEY, inferenceLocation);
+  } catch (err) {
+    // ignore storage failures
+  }
+  syncInferenceSelector();
+}
+
+async function initializeInferenceBackends() {
+  const offline = window.OfflineInference || {};
+  const BackendClass = offline.BackendWsInferenceBackend;
+  if (typeof BackendClass === 'function') {
+    backendInferenceBackend = new BackendClass();
+    try {
+      await backendInferenceBackend.init();
+    } catch (err) {
+      // keep backend path via existing WS logic
+    }
+  } else {
+    backendInferenceBackend = null;
+  }
+
+  effectiveInferenceLocation = 'backend';
+  browserInferenceBackend = null;
+
+  if (inferenceLocation !== 'browser') {
+    setInferenceStatus('Используется backend WebSocket.', 'normal');
+    return;
+  }
+
+  const BrowserClass = offline.BrowserOrtInferenceBackend;
+  if (typeof BrowserClass !== 'function') {
+    setInferenceStatus('Browser mode недоступен: модуль ORT не подключен. Используется backend.', 'warn');
+    return;
+  }
+
+  browserInferenceBackend = new BrowserClass();
+  const result = await browserInferenceBackend.init({
+    wordModelUrl: OFFLINE_WORD_MODEL_URL,
+    bioModelUrl: OFFLINE_BIO_MODEL_URL,
+    manifestUrl: OFFLINE_MANIFEST_URL,
+    executionProviders: ['wasm'],
+    wasmThreads: 1,
+  });
+
+  if (result?.ok) {
+    setInferenceStatus('Browser mode experimental: модели загружены, активен fallback на backend WS.', 'ok');
+  } else {
+    const reason = String(result?.reason || browserInferenceBackend?.lastError || 'init failed');
+    setInferenceStatus(`Browser mode experimental недоступен (${reason}). Используется backend WS.`, 'warn');
+  }
+}
+
+function setupInferenceControls() {
+  loadInferencePreference();
+  if (!inferenceLocationEl) return;
+  inferenceLocationEl.addEventListener('change', () => {
+    const selected = normalizeInferenceLocation(inferenceLocationEl.value);
+    saveInferencePreference(selected);
+    if (stream) {
+      setInferenceStatus('Новый inference_location применится после перезапуска камеры.', 'warn');
+    } else {
+      setInferenceStatus(
+        selected === 'browser'
+          ? 'Browser mode experimental выбран. Запустите камеру для инициализации.'
+          : 'Используется backend WebSocket.',
+        selected === 'browser' ? 'warn' : 'normal',
+      );
+    }
+  });
 }
 
 function wsUrl() {
@@ -447,7 +559,7 @@ function updateDebugPanel(data) {
   const bio = data?.bio || data?.debug?.bio || {};
   const mode = String(data?.mode || recognitionMode || 'letters');
 
-  if (dbgModeEl) dbgModeEl.textContent = mode;
+  if (dbgModeEl) dbgModeEl.textContent = `${mode} (${effectiveInferenceLocation})`;
   if (dbgLatencyEl) {
     const latency = Number(perf.latency_ms ?? data?.debug?.latency_ms);
     dbgLatencyEl.textContent = Number.isFinite(latency) ? `${latency.toFixed(1)} ms` : 'n/a';
@@ -606,6 +718,7 @@ async function startCamera() {
   if (stream) return;
   shouldRun = true;
   await fetchServerConfig();
+  await initializeInferenceBackends();
 
   stream = await navigator.mediaDevices.getUserMedia({
     audio: false,
@@ -653,6 +766,12 @@ function stopCamera() {
     ws = null;
   }
 
+  if (browserInferenceBackend && typeof browserInferenceBackend.dispose === 'function') {
+    browserInferenceBackend.dispose().catch(() => undefined);
+  }
+  browserInferenceBackend = null;
+  effectiveInferenceLocation = 'backend';
+
   if (stream) {
     stream.getTracks().forEach((track) => track.stop());
     stream = null;
@@ -682,6 +801,12 @@ function stopCamera() {
   statusEl.textContent = 'NONE';
   letterEl.textContent = 'NONE';
   textValueEl.textContent = 'NONE';
+  setInferenceStatus(
+    inferenceLocation === 'browser'
+      ? 'Browser mode experimental выбран. Запустите камеру для инициализации.'
+      : 'Используется backend WebSocket.',
+    inferenceLocation === 'browser' ? 'warn' : 'normal',
+  );
   renderSentencesPanel();
   renderSegmentsTimeline(Date.now());
   updateDebugPanel({ mode: 'letters', perf: {}, bio: { enabled: false } });
@@ -877,3 +1002,10 @@ window.addEventListener('beforeunload', () => {
 renderSentencesPanel();
 renderSegmentsTimeline(Date.now());
 updateDebugPanel({ mode: recognitionMode, perf: {}, bio: { enabled: false } });
+setupInferenceControls();
+setInferenceStatus(
+  inferenceLocation === 'browser'
+    ? 'Browser mode experimental выбран. Запустите камеру для инициализации.'
+    : 'Используется backend WebSocket.',
+  inferenceLocation === 'browser' ? 'warn' : 'normal',
+);

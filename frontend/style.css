@@ -150,6 +150,44 @@ canvas {
   flex-wrap: wrap;
 }
 
+.inference-controls {
+  margin-top: 10px;
+  display: grid;
+  gap: 8px;
+  max-width: 360px;
+}
+
+.inference-controls label {
+  color: var(--muted);
+  font-size: 0.88rem;
+  letter-spacing: 0.03em;
+}
+
+.inference-controls select {
+  border: 1px solid rgba(120, 164, 187, 0.45);
+  background: linear-gradient(180deg, rgba(23, 46, 60, 0.94), rgba(15, 30, 41, 0.94));
+  color: var(--text);
+  padding: 10px 12px;
+  border-radius: 10px;
+  font-weight: 600;
+}
+
+.inference-status {
+  margin-top: 0;
+}
+
+.inference-status.warn {
+  color: var(--warn);
+}
+
+.inference-status.ok {
+  color: var(--ok);
+}
+
+.inference-status.err {
+  color: var(--err);
+}
+
 .skeleton-toggles {
   margin-top: 10px;
   display: flex;

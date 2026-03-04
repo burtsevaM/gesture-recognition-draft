@@ -41,6 +41,16 @@
           <button id="stopBtn" disabled>Остановить</button>
           <a href="/gallery" target="_blank" rel="noreferrer">Gallery inspector</a>
         </div>
+        <div class="inference-controls">
+          <label for="inferenceLocation">inference_location</label>
+          <select id="inferenceLocation">
+            <option value="backend" selected>backend</option>
+            <option value="browser">browser (experimental)</option>
+          </select>
+          <div id="inferenceStatus" class="small inference-status">
+            Используется backend WebSocket.
+          </div>
+        </div>
         <div class="skeleton-toggles">
           <label class="toggle-item">
             <input type="checkbox" id="rawSkeletonToggle" />
@@ -131,6 +141,9 @@
     </main>
   </div>
 
+  <script src="/static/offline/inference_backend.js"></script>
+  <script src="/static/offline/backend_ws.js"></script>
+  <script src="/static/offline/backend_browser_ort.js"></script>
   <script src="/static/app.js"></script>
 </body>
 </html>
