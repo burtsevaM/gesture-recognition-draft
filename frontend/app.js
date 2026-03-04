@@ -16,6 +16,8 @@ const holdEl = document.getElementById('hold');
 const remainEl = document.getElementById('remain');
 const progressBar = document.getElementById('progressBar');
 const textValueEl = document.getElementById('textValue');
+const committedWordsEl = document.getElementById('committedWords');
+const sentencesListEl = document.getElementById('sentencesList');
 const topkEl = document.getElementById('topk');
 const debugEl = document.getElementById('debug');
 
@@ -64,6 +66,9 @@ let awaitingServer = false;
 let lastSendAtMs = 0;
 let stableVisibleLetter = 'NONE';
 let recognitionMode = 'letters';
+let committedTokens = [];
+let lastCommitToken = '';
+let lastCommitAtMs = 0;
 
 const captureCanvas = document.createElement('canvas');
 const captureCtx = captureCanvas.getContext('2d');
@@ -89,6 +94,103 @@ function applyMirrorStyles() {
 function wsUrl() {
   const proto = location.protocol === 'https:' ? 'wss' : 'ws';
   return `${proto}://${location.host}/ws/stream`;
+}
+
+function compactSpaces(text) {
+  return String(text || '').replace(/\s+/g, ' ').trim();
+}
+
+function formatTranscript(tokens) {
+  if (!Array.isArray(tokens) || tokens.length === 0) return '';
+  const raw = compactSpaces(tokens.join(' '));
+  return raw.replace(/\s+([,.;:!?])/g, '$1');
+}
+
+function splitSentences(text) {
+  const source = compactSpaces(text);
+  if (!source) return [];
+
+  if (typeof Intl !== 'undefined' && typeof Intl.Segmenter === 'function') {
+    try {
+      const segmenter = new Intl.Segmenter('ru', { granularity: 'sentence' });
+      const segments = [];
+      for (const part of segmenter.segment(source)) {
+        const sentence = compactSpaces(part.segment);
+        if (sentence) {
+          segments.push(sentence);
+        }
+      }
+      if (segments.length > 0) {
+        return segments;
+      }
+    } catch (err) {
+      // fallback ниже
+    }
+  }
+
+  const fallback = source.match(/[^.?!]+[.?!]*/g) || [];
+  const cleaned = fallback.map((item) => compactSpaces(item)).filter(Boolean);
+  if (cleaned.length > 0) {
+    return cleaned;
+  }
+  return [source];
+}
+
+function renderSentencesPanel() {
+  const transcript = formatTranscript(committedTokens);
+  committedWordsEl.textContent = transcript || '—';
+
+  const sentences = splitSentences(transcript);
+  sentencesListEl.innerHTML = '';
+  if (sentences.length === 0) {
+    const li = document.createElement('li');
+    li.className = 'small';
+    li.textContent = 'Пока нет предложений.';
+    sentencesListEl.appendChild(li);
+    return;
+  }
+
+  for (const sentence of sentences) {
+    const li = document.createElement('li');
+    li.textContent = sentence;
+    sentencesListEl.appendChild(li);
+  }
+}
+
+function extractCommitToken(data, mode) {
+  if (mode !== 'words' && mode !== 'pose_words') {
+    return '';
+  }
+
+  const committedNow = Boolean(data?.text_state?.committed);
+  const status = String(data?.status || '').toUpperCase();
+  const isCommitState = committedNow || status === 'COMMIT' || status === 'COMMITTED';
+  if (!isCommitState) {
+    return '';
+  }
+
+  const token = compactSpaces(String(data?.word || data?.letter || ''));
+  if (!token || token.toUpperCase() === 'NONE') {
+    return '';
+  }
+  return token;
+}
+
+function appendCommitToken(data, mode) {
+  const token = extractCommitToken(data, mode);
+  if (!token) {
+    return;
+  }
+
+  const nowMs = Date.now();
+  if (token === lastCommitToken && (nowMs - lastCommitAtMs) < 900) {
+    return;
+  }
+
+  committedTokens.push(token);
+  lastCommitToken = token;
+  lastCommitAtMs = nowMs;
+  renderSentencesPanel();
 }
 
 function isFinitePoint(point) {
@@ -289,7 +391,7 @@ async function fetchServerConfig() {
       sendFps = Number(data.config.frontend_fps || 12);
       jpegQuality = Number(data.config.jpeg_quality || 0.75);
       recognitionMode = String(data.config.recognition_mode || 'letters');
-      tokenLabelEl.textContent = recognitionMode === 'words' ? 'Слово' : 'Буква';
+      tokenLabelEl.textContent = recognitionMode === 'words' ? 'Слово' : (recognitionMode === 'pose_words' ? 'Поза' : 'Буква');
     }
   } catch (err) {
     console.warn('health config unavailable:', err);
@@ -321,6 +423,7 @@ async function startCamera() {
 
   startBtn.disabled = true;
   stopBtn.disabled = false;
+  renderSentencesPanel();
 }
 
 function stopCamera() {
@@ -361,9 +464,13 @@ function stopCamera() {
   lastSendAtMs = 0;
   stableVisibleLetter = 'NONE';
   recognitionMode = 'letters';
+  committedTokens = [];
+  lastCommitToken = '';
+  lastCommitAtMs = 0;
   statusEl.textContent = 'NONE';
   letterEl.textContent = 'NONE';
   textValueEl.textContent = 'NONE';
+  renderSentencesPanel();
 }
 
 function connectWs() {
@@ -457,6 +564,7 @@ function renderLoop() {
 function renderState(data) {
   const mode = String(data.mode || recognitionMode || 'letters');
   recognitionMode = mode;
+  appendCommitToken(data, mode);
   tokenLabelEl.textContent = mode === 'words' ? 'Слово' : (mode === 'pose_words' ? 'Поза' : 'Буква');
 
   setStatusClass(data.status);
@@ -518,3 +626,5 @@ stopBtn.addEventListener('click', () => {
 window.addEventListener('beforeunload', () => {
   stopCamera();
 });
+
+renderSentencesPanel();

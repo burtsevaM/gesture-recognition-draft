@@ -293,6 +293,34 @@ button:disabled {
   text-transform: uppercase;
 }
 
+.sentence-module {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.sentence-caption {
+  margin-top: -2px;
+}
+
+.committed-words {
+  min-height: 56px;
+  border: 1px dashed rgba(151, 174, 187, 0.45);
+  border-radius: 10px;
+  padding: 10px 12px;
+  background: rgba(5, 11, 16, 0.45);
+  color: var(--text);
+  line-height: 1.4;
+  word-break: break-word;
+}
+
+.sentences-list {
+  margin: 0;
+  padding-left: 20px;
+  display: grid;
+  gap: 6px;
+}
+
 .kv {
   display: flex;
   justify-content: space-between;
