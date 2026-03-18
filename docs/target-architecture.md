@@ -67,6 +67,8 @@
 - использовать для сравнения качества, latency и fallback-экспериментов;
 - если он не нужен продуктово, перевести его в `experimental/` или отдельный baseline-модуль.
 
+Практические критерии, по которым `words` можно переводить в `frozen`/`deprecated`/`baseline-only` статус, зафиксированы в [docs/validation-gates.md](validation-gates.md).
+
 ### 3.5. Что делать с `letters`
 
 Рекомендуется:
