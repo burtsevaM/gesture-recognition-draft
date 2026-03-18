@@ -9,7 +9,7 @@ pose_worker:
   enabled: true
   queue_size: 3
   output_size: 4
-frontend_fps: 8
+frontend_fps: 6
 jpeg_quality: 0.75
 hold_ms: 700
 cooldown_ms: 500
@@ -46,12 +46,12 @@ hand_min_detection_confidence: 0.55
 hand_min_presence_confidence: 0.55
 hand_min_tracking_confidence: 0.55
 word_model:
-  path: backend/artifacts/slovo_word_model.onnx
+  path: backend/artifacts/slovo_word_model_mvit16-4.onnx
   labels_path: backend/artifacts/labels.txt
   input_size: 224
-  window_frames: 32
+  window_frames: 16
   frame_interval: 2
-  step: 4
+  step: 10
   topk: 5
   mean:
   - 123.675
@@ -77,12 +77,12 @@ commit_logic:
   dedup_same_word: true
 performance:
   max_fps_inference: 0
-  ort_num_threads: 1
+  ort_num_threads: 4
 runtime_log:
   enabled: true
   path: backend/artifacts/words_runtime.jsonl
 segmentation:
-  enabled: false
+  enabled: true
   model_path: backend/artifacts/bio_segmenter.onnx
   thresholds_path: backend/artifacts/bio_thresholds.json
   window: 256

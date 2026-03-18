@@ -1,0 +1,11 @@
+{
+  "generated_by": "backend/train/make_dummy_bio_segmenter.py",
+  "input_dim": 159,
+  "window_size": 256,
+  "dynamic_time": true,
+  "model": {
+    "type": "dummy_bio_segmenter",
+    "hidden_dim": 64
+  },
+  "onnx_path": "/Users/mariaburtseva/Documents/проект грант/mvp1/SuperLuchito--SimpleGesture2Letter-Model-Version-2/backend/artifacts/bio_segmenter.onnx"
+}

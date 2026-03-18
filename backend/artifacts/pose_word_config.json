@@ -1,0 +1,28 @@
+{
+  "generated_by": "backend/train/make_dummy_pose_word_model.py",
+  "input": {
+    "name": "features",
+    "shape": [
+      1,
+      32,
+      159
+    ],
+    "dtype": "float32"
+  },
+  "output": {
+    "name": "logits",
+    "shape": [
+      1,
+      1001
+    ],
+    "dtype": "float32"
+  },
+  "model": {
+    "type": "dummy_pose_word_classifier",
+    "clip_frames": 32,
+    "input_dim": 159,
+    "num_classes": 1001
+  },
+  "labels_total": 1001,
+  "feature_schema": "compose_features: body(11x3)+left_hand(21x3)+right_hand(21x3)=159"
+}

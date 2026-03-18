@@ -1,0 +1,18 @@
+{
+  "generated_by": "backend/train/make_dummy_bio_segmenter.py",
+  "bio_mapping": {
+    "B": 0,
+    "I": 1,
+    "O": 2
+  },
+  "sign": {
+    "th_b": 0.6,
+    "th_o": 0.6
+  },
+  "phrase": {
+    "th_b": 0.6,
+    "th_o": 0.6
+  },
+  "min_len": 6,
+  "merge_gap": 2
+}
