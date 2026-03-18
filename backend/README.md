@@ -5,7 +5,7 @@
 ## 1) Установка зависимостей
 
 ```bash
-cd "/Users/mariaburtseva/Documents/проект грант/mvp1/SuperLuchito--SimpleGesture2Letter-Model-Version-2"
+cd <repo-root>
 python3 -m venv .venv
 source .venv/bin/activate
 pip install -r backend/requirements.txt
@@ -31,6 +31,15 @@ python -m backend.scripts.bootstrap_pose_words_artifacts
 ```
 
 Документация по артефактам: `backend/docs/pose_words_artifacts.md`.
+
+Для честной non-dummy технической валидации есть отдельный workflow:
+
+```bash
+source .venv/bin/activate
+python backend/scripts/run_pose_words_validation.py
+```
+
+Он обучает минимальные validation-модели, экспортирует ONNX, временно поднимает backend в `pose_words` и пишет локальный report в `backend/artifacts/validation/pose_words/technical_validation_report.json`. Подробности и ограничения зафиксированы в `docs/pose_words_technical_validation.md`.
 
 ## 3) Включение режима pose_words + segmentation
 
@@ -116,6 +125,8 @@ python backend/scripts/smoke_pose_words.py \
   --video /absolute/path/to/video.mp4 \
   --duration-sec 30
 ```
+
+Важно: этот smoke удобен для проверки readiness и отсутствия падения сервиса, но сам по себе не доказывает положительное распознавание на реальных validation artifacts. Для train/export/runtime validation используйте `backend/scripts/run_pose_words_validation.py`.
 
 ## 7) Regression tests
 

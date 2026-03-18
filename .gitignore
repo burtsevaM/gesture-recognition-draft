@@ -16,6 +16,8 @@ backend/artifacts/meta.json
 backend/artifacts/uncertain_events/
 backend/artifacts/models/
 backend/artifacts/*.onnx
+backend/artifacts/validation/
+backend/data/pose_words_validation/generated/
 backend/data/slovo/
 backend/data/slovo_repo/
 backend/gallery/**

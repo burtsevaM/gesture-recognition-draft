@@ -43,6 +43,13 @@ def _resolve(path: str | Path) -> Path:
     return (ROOT_DIR / p).resolve()
 
 
+def _display_path(path: Path) -> str:
+    try:
+        return str(path.resolve().relative_to(ROOT_DIR))
+    except Exception:
+        return str(path.resolve())
+
+
 def _ensure_onnx_dependency() -> None:
     if importlib.util.find_spec("onnx") is not None:
         return
@@ -95,6 +102,10 @@ def main() -> int:
 
     thresholds_payload = {
         "generated_by": "backend/train/make_dummy_bio_segmenter.py",
+        "artifact_kind": "dummy",
+        "dataset_kind": "synthetic_fixture",
+        "trained": False,
+        "source_pipeline": "bootstrap_pose_words_artifacts",
         "bio_mapping": {"B": 0, "I": 1, "O": 2},
         "sign": {"th_b": 0.6, "th_o": 0.6},
         "phrase": {"th_b": 0.6, "th_o": 0.6},
@@ -106,6 +117,10 @@ def main() -> int:
 
     config_payload = {
         "generated_by": "backend/train/make_dummy_bio_segmenter.py",
+        "artifact_kind": "dummy",
+        "dataset_kind": "synthetic_fixture",
+        "trained": False,
+        "source_pipeline": "bootstrap_pose_words_artifacts",
         "input_dim": feature_dim,
         "window_size": window_size,
         "dynamic_time": True,
@@ -113,7 +128,7 @@ def main() -> int:
             "type": "dummy_bio_segmenter",
             "hidden_dim": hidden_dim,
         },
-        "onnx_path": str(onnx_path),
+        "onnx_path": _display_path(onnx_path),
     }
     config_path.parent.mkdir(parents=True, exist_ok=True)
     config_path.write_text(json.dumps(config_payload, ensure_ascii=False, indent=2), encoding="utf-8")

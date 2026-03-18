@@ -48,12 +48,23 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--window-size", type=int, default=256, help="Dummy time length used for export")
     parser.add_argument("--dynamic-time", type=parse_bool, default=True)
     parser.add_argument("--opset", type=int, default=17)
+    parser.add_argument("--artifact-kind", type=str, default="", help="dummy|validation|runtime; defaults to checkpoint metadata or runtime")
+    parser.add_argument("--dataset-kind", type=str, default="", help="synthetic_fixture|mini_validation|real_dataset; defaults to checkpoint metadata")
+    parser.add_argument("--source-pipeline", type=str, default="", help="Artifact lineage marker; defaults to checkpoint metadata")
     return parser
 
 
 def save_json(path: Path, payload: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def _display_path(path: Path) -> str:
+    root = Path(__file__).resolve().parents[2]
+    try:
+        return str(path.resolve().relative_to(root))
+    except Exception:
+        return str(path.resolve())
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -123,6 +134,11 @@ def main(argv: list[str] | None = None) -> int:
 
     train_cfg = checkpoint.get("train_config", {})
     bio_config = {
+        "generated_by": "backend/train/export_bio_segmenter_onnx.py",
+        "artifact_kind": str(args.artifact_kind).strip() or str(checkpoint.get("artifact_kind") or "runtime"),
+        "dataset_kind": str(args.dataset_kind).strip() or str(checkpoint.get("dataset_kind") or "unknown"),
+        "trained": bool(checkpoint.get("trained", True)),
+        "source_pipeline": str(args.source_pipeline).strip() or str(checkpoint.get("source_pipeline") or "train_export"),
         "input_dim": feature_dim,
         "window_size": window_size,
         "dynamic_time": bool(args.dynamic_time),
@@ -137,8 +153,8 @@ def main(argv: list[str] | None = None) -> int:
             "use_shoulder_norm": bool(train_cfg.get("use_shoulder_norm", True)),
             "use_hands_3d_norm": bool(train_cfg.get("use_hands_3d_norm", False)),
         },
-        "checkpoint": str(checkpoint_path),
-        "onnx_path": str(onnx_out),
+        "checkpoint": _display_path(checkpoint_path),
+        "onnx_path": _display_path(onnx_out),
     }
     save_json(Path(args.bio_config_out).resolve(), bio_config)
 

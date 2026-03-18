@@ -48,6 +48,13 @@ def _resolve(path: str | Path) -> Path:
     return (ROOT_DIR / p).resolve()
 
 
+def _display_path(path: Path) -> str:
+    try:
+        return str(path.resolve().relative_to(ROOT_DIR))
+    except Exception:
+        return str(path.resolve())
+
+
 def _ensure_onnx_dependency() -> None:
     if importlib.util.find_spec("onnx") is not None:
         return
@@ -110,6 +117,10 @@ def main() -> int:
 
     payload = {
         "generated_by": "backend/train/make_dummy_pose_word_model.py",
+        "artifact_kind": "dummy",
+        "dataset_kind": "synthetic_fixture",
+        "trained": False,
+        "source_pipeline": "bootstrap_pose_words_artifacts",
         "input": {
             "name": "features",
             "shape": [1, clip_frames, feature_dim],
@@ -128,6 +139,8 @@ def main() -> int:
         },
         "labels_total": len(labels),
         "feature_schema": "compose_features: body(11x3)+left_hand(21x3)+right_hand(21x3)=159",
+        "onnx_path": _display_path(onnx_path),
+        "labels_path": _display_path(labels_path),
     }
     config_path.parent.mkdir(parents=True, exist_ok=True)
     config_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")

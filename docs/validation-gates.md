@@ -10,6 +10,8 @@
 
 До прохождения этих критериев `words` остается baseline/reference pipeline. Наличие выбранного целевого направления само по себе не означает, что `words` уже можно заморозить, убрать или перевести в неактивный статус.
 
+Техническая валидация воспроизводимого non-dummy validation path отдельно зафиксирована в `docs/pose_words_technical_validation.md`.
+
 ## 2. Связь с текущими архитектурными решениями
 
 В `ADR-001` уже зафиксировано, что `pose_words` является целевым основным pipeline для распознавания слов, а `words` сохраняется как временный baseline/reference pipeline.
@@ -28,8 +30,8 @@
 
 | Gate | Краткое название | Текущий статус |
 | --- | --- | --- |
-| VG-01 | Реальные pose/BIO артефакты | не выполнен |
-| VG-02 | Воспроизводимый train/export/inference путь | частично выполнен |
+| VG-01 | Реальные pose/BIO артефакты | частично выполнен |
+| VG-02 | Воспроизводимый train/export/inference путь | выполнен |
 | VG-03 | Корректный runtime-запуск `pose_words` | выполнен |
 | VG-04 | Smoke/integration проверка рабочего контура | частично выполнен |
 | VG-05 | Понятный контракт входа/выхода | частично выполнен |
@@ -43,9 +45,9 @@
 - Что считается условием прохождения: в репозитории или в поддерживаемом внешнем артефактном хранилище существуют реальные артефакты для `pose_word` classifier и BIO segmenter; они не помечены как dummy/bootstrap; их происхождение, датасетный контекст и роль в runtime понятны.
 - Какие артефакты/доказательства должны существовать: актуальные `pose_word_model.onnx`, `pose_word_labels.txt`, `pose_word_config.json`, `bio_segmenter.onnx`, `bio_thresholds.json`, `bio_config.json`, а также метаданные training/export происхождения или отчет о происхождении артефактов.
 - Как проверяется gate: проверяются активные артефакты и их JSON-метаданные; в конфиге и документации не должно быть указаний, что runtime использует `make_dummy_*` или bootstrap baseline вместо реальных моделей.
-- Текущий статус по репозиторию: **не выполнен**.
+- Текущий статус по репозиторию: **частично выполнен**.
 
-Основание: `backend/artifacts/pose_word_config.json` содержит `generated_by: backend/train/make_dummy_pose_word_model.py`, а `backend/artifacts/bio_config.json` и `backend/artifacts/bio_thresholds.json` содержат `generated_by: backend/train/make_dummy_bio_segmenter.py`. В `backend/docs/pose_words_artifacts.md` прямо указано, что `make_dummy_*` создают минимальные baseline ONNX для восстановления пайплайна, а не целевые модели.
+Основание: в репозитории появился воспроизводимый validation path `backend/scripts/run_pose_words_validation.py`, который реально обучает обе модели, экспортирует non-dummy ONNX-артефакты в `backend/artifacts/validation/pose_words/` и маркирует их как `artifact_kind: validation`, `dataset_kind: synthetic_fixture`, `trained: true`. Это подтверждено документом `docs/pose_words_technical_validation.md` и локальным validation report. При этом default runtime artifacts в `backend/artifacts/pose_word_config.json`, `backend/artifacts/bio_config.json` и `backend/artifacts/bio_thresholds.json` по-прежнему относятся к bootstrap/dummy baseline, поэтому gate нельзя считать полностью закрытым для решения о снятии `words`.
 
 ### VG-02. Воспроизводимый путь train/export/inference
 
@@ -53,9 +55,9 @@
 - Что считается условием прохождения: существует понятный и документированный путь `train -> export -> runtime use` для `pose_word` classifier и BIO segmenter без скрытой зависимости от локальной машины конкретного разработчика.
 - Какие артефакты/доказательства должны существовать: скрипты подготовки датасета, скрипты обучения, скрипты экспорта, runtime runbook, ожидаемые выходные артефакты, а также подтверждение, что этот путь действительно собирает используемые runtime-файлы.
 - Как проверяется gate: на чистом окружении или в CI воспроизводится полный путь от подготовленного датасета до запуска backend с полученными артефактами.
-- Текущий статус по репозиторию: **частично выполнен**.
+- Текущий статус по репозиторию: **выполнен**.
 
-Основание: в репозитории есть `backend/scripts/slovo_to_pose_dataset.py`, `backend/scripts/build_bio_continuous_dataset.py`, `backend/train/train_pose_word_model.py`, `backend/train/export_pose_word_onnx.py`, `backend/train/train_pose_bio_segmenter.py`, `backend/train/export_bio_segmenter_onnx.py`, а также runtime runbook в `backend/README.md`. При этом `docs/current-state.md` отдельно фиксирует, что нет CI-подтверждения воспроизводимости реальных артефактов из нуля, а `backend/docs/pose_model_and_bio_plan.md` частично отстает от фактического кода и описывает часть train/export слоя как scaffolding.
+Основание: в репозитории теперь есть единый runner `backend/scripts/run_pose_words_validation.py`, который проходит путь `synthetic_fixture -> train -> export -> runtime use -> backend smoke -> report` без скрытых локальных ручных шагов. Фактический прогон зафиксирован в `docs/pose_words_technical_validation.md`: были реально обучены `pose_word` classifier и BIO segmenter, экспортированы ONNX-артефакты и сформирован machine-readable report. Это закрывает gate именно на уровне технической воспроизводимости validation path; оно не означает подтверждения product-grade training path на большом реальном датасете.
 
 ### VG-03. Корректный runtime-запуск `pose_words`
 
@@ -75,7 +77,7 @@
 - Как проверяется gate: поднимается backend, запускается smoke-сценарий, проверяются `/health`, WS-поток, наличие `pose_words` payload, сегментов и итогового JSONL-лога или аналогичного артефакта.
 - Текущий статус по репозиторию: **частично выполнен**.
 
-Основание: в репозитории есть `backend/scripts/smoke_pose_words.py`, `backend/scripts/smoke_pose_words_segmentation.py`, runbook в `backend/README.md` и интеграционный тест `backend/tests/test_pose_words_integration_smoke.py`. Но `docs/current-state.md` отдельно фиксирует, что полноценный end-to-end с реальной камерой и реальными production-моделями не подтвержден, а текущий smoke опирается на synthetic/mock или dummy-сценарии.
+Основание: в репозитории есть `backend/scripts/smoke_pose_words.py`, `backend/scripts/smoke_pose_words_segmentation.py`, runbook в `backend/README.md`, интеграционный тест `backend/tests/test_pose_words_integration_smoke.py` и новый reproducible runner `backend/scripts/run_pose_words_validation.py`. Фактический validation run подтвердил backend startup в `pose_words`, readiness на non-dummy validation artifacts и direct runtime replay до результата. При этом backend WebSocket smoke по-прежнему использует mock JPEG frames и в зафиксированном прогоне не дал положительных segment/commit событий, поэтому gate остается частично выполненным, а не полностью закрытым.
 
 ### VG-05. Понятный контракт входа/выхода для интеграции
 
@@ -115,7 +117,7 @@
 - Как проверяется gate: проверяется, можно ли по документации понять назначение pipeline, required artifacts, сценарий запуска, базовые ограничения и критерии готовности без обращения к устным пояснениям.
 - Текущий статус по репозиторию: **частично выполнен**.
 
-Основание: в репозитории уже есть `docs/current-state.md`, `docs/target-architecture.md`, `docs/adr/ADR-001-pose-words-target.md`, `backend/README.md` и `backend/docs/pose_words_artifacts.md`; после добавления этого документа критерии перехода также зафиксированы явно. При этом сохраняются документальные пробелы и рассинхронизация: например, `docs/target-architecture.md` отдельно указывает на отсутствие выделенного contract document, а `backend/docs/pose_model_and_bio_plan.md` частично устарел относительно текущего train/export кода.
+Основание: в репозитории уже есть `docs/current-state.md`, `docs/target-architecture.md`, `docs/adr/ADR-001-pose-words-target.md`, `backend/README.md`, `backend/docs/pose_words_artifacts.md`, этот документ и новый `docs/pose_words_technical_validation.md`. Документация теперь явно разделяет bootstrap и validation path и описывает reproducible technical validation workflow. При этом сохраняются документальные пробелы и рассинхронизация: например, `docs/target-architecture.md` отдельно указывает на отсутствие выделенного contract document, а `backend/docs/pose_model_and_bio_plan.md` частично устарел относительно текущего train/export кода.
 
 ## 5. Обязательные и вспомогательные gates
 
@@ -149,9 +151,9 @@
 
 ### Краткий итог
 
-- Выполнен: `VG-03`.
-- Частично выполнены: `VG-02`, `VG-04`, `VG-05`, `VG-08`.
-- Не выполнены: `VG-01`, `VG-06`.
+- Выполнены: `VG-02`, `VG-03`.
+- Частично выполнены: `VG-01`, `VG-04`, `VG-05`, `VG-08`.
+- Не выполнен: `VG-06`.
 - Требует ручной проверки: `VG-07`.
 
 ### Управленческий вывод
@@ -159,8 +161,8 @@
 По текущему состоянию репозитория `pose_words` подтвержден как архитектурное целевое направление, но не подтвержден как достаточная замена для снятия `words` с активной baseline-роли.
 
 Главные блокеры на данный момент:
-- активные pose/BIO артефакты в рабочем дереве являются dummy/bootstrap;
-- не зафиксирован воспроизводимый и подтвержденный путь получения именно реальных runtime-артефактов;
+- default pose/BIO артефакты в рабочем дереве остаются dummy/bootstrap baseline, хотя отдельный validation path для non-dummy artifacts уже подтвержден;
+- положительное end-to-end распознавание через backend WebSocket на camera/video контуре не зафиксировано как пройденный reproducible smoke;
 - отсутствует оформленное baseline comparison `pose_words` против `words`;
 - стабильность на demo/integration контуре не зафиксирована как пройденная ручная валидация.
 

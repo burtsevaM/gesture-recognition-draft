@@ -21,6 +21,14 @@ except ImportError:  # pragma: no cover - script mode fallback
     from bio_decode_eval import BIO_MAPPING, evaluate_prob_sequences
 
 IGNORE_INDEX = -100
+ROOT_DIR = Path(__file__).resolve().parents[2]
+
+
+def _display_path(path: Path) -> str:
+    try:
+        return str(path.resolve().relative_to(ROOT_DIR))
+    except Exception:
+        return str(path.resolve())
 
 
 @dataclass(slots=True)
@@ -433,6 +441,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--use-hands-3d-norm", type=parse_bool, default=False)
     parser.add_argument("--device", default="auto")
     parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--artifact-kind", type=str, default="runtime", help="dummy|validation|runtime")
+    parser.add_argument("--dataset-kind", type=str, default="unknown", help="synthetic_fixture|mini_validation|real_dataset|unknown")
+    parser.add_argument("--source-pipeline", type=str, default="train_pose_bio_segmenter", help="Marker for produced checkpoint lineage")
     return parser
 
 
@@ -585,6 +596,10 @@ def main(argv: list[str] | None = None) -> int:
                 "epoch": int(epoch),
                 "model_state": model.state_dict(),
                 "feature_dim": int(train_ds.feature_dim),
+                "artifact_kind": str(args.artifact_kind).strip() or "runtime",
+                "dataset_kind": str(args.dataset_kind).strip() or "unknown",
+                "trained": True,
+                "source_pipeline": str(args.source_pipeline).strip() or "train_pose_bio_segmenter",
                 "model_config": {
                     "hidden_size": int(args.hidden_size),
                     "num_layers": int(args.num_layers),
@@ -663,6 +678,11 @@ def main(argv: list[str] | None = None) -> int:
         }
 
     thresholds_payload = {
+        "generated_by": "backend/train/train_pose_bio_segmenter.py",
+        "artifact_kind": str(args.artifact_kind).strip() or "runtime",
+        "dataset_kind": str(args.dataset_kind).strip() or "unknown",
+        "trained": True,
+        "source_pipeline": str(args.source_pipeline).strip() or "train_pose_bio_segmenter",
         "bio_mapping": BIO_MAPPING,
         "best_epoch": int(best_epoch),
         "sign": best_payload["thresholds"]["sign"],
@@ -679,8 +699,8 @@ def main(argv: list[str] | None = None) -> int:
 
     summary_payload = {
         "config": {
-            "data_dir": str(data_dir),
-            "save_dir": str(save_dir),
+            "data_dir": _display_path(data_dir),
+            "save_dir": _display_path(save_dir),
             "epochs": int(args.epochs),
             "batch_size": int(args.batch_size),
             "lr": float(args.lr),
@@ -694,6 +714,10 @@ def main(argv: list[str] | None = None) -> int:
             "seed": int(args.seed),
             "device": str(device),
         },
+        "artifact_kind": str(args.artifact_kind).strip() or "runtime",
+        "dataset_kind": str(args.dataset_kind).strip() or "unknown",
+        "trained": True,
+        "source_pipeline": str(args.source_pipeline).strip() or "train_pose_bio_segmenter",
         "feature_dim": int(train_ds.feature_dim),
         "class_weights": {
             "sign": sign_weights_np.tolist(),

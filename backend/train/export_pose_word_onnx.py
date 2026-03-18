@@ -58,12 +58,22 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--opset", type=int, default=17)
     parser.add_argument("--dynamic-batch", type=parse_bool, default=False)
     parser.add_argument("--verify", type=parse_bool, default=True, help="Run ONNXRuntime sanity check after export")
+    parser.add_argument("--artifact-kind", type=str, default="", help="dummy|validation|runtime; defaults to checkpoint metadata or runtime")
+    parser.add_argument("--dataset-kind", type=str, default="", help="synthetic_fixture|mini_validation|real_dataset; defaults to checkpoint metadata")
+    parser.add_argument("--source-pipeline", type=str, default="", help="Artifact lineage marker; defaults to checkpoint metadata")
     return parser
 
 
 
 def _resolve_path(path: Path) -> Path:
     return path if path.is_absolute() else (ROOT_DIR / path).resolve()
+
+
+def _display_path(path: Path) -> str:
+    try:
+        return str(path.resolve().relative_to(ROOT_DIR))
+    except Exception:
+        return str(path.resolve())
 
 
 
@@ -237,9 +247,14 @@ def main() -> int:
     labels_path.write_text("\n".join(labels) + "\n", encoding="utf-8")
 
     config_payload = {
-        "checkpoint": str(checkpoint_path),
-        "onnx_path": str(output_path),
-        "labels_path": str(labels_path),
+        "generated_by": "backend/train/export_pose_word_onnx.py",
+        "artifact_kind": str(args.artifact_kind).strip() or str(ckpt.get("artifact_kind") or "runtime"),
+        "dataset_kind": str(args.dataset_kind).strip() or str(ckpt.get("dataset_kind") or "unknown"),
+        "trained": bool(ckpt.get("trained", True)),
+        "source_pipeline": str(args.source_pipeline).strip() or str(ckpt.get("source_pipeline") or "train_export"),
+        "checkpoint": _display_path(checkpoint_path),
+        "onnx_path": _display_path(output_path),
+        "labels_path": _display_path(labels_path),
         "input": {
             "name": "features",
             "shape": [1, int(model_cfg["clip_frames"]), int(model_cfg["input_dim"])],

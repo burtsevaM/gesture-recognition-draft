@@ -24,6 +24,13 @@ from app.pose_words.segment_utils import resample_to_fixed_T  # noqa: E402
 from train.pose_word_arch import PoseWordClassifier  # noqa: E402
 
 
+def _display_path(path: Path) -> str:
+    try:
+        return str(path.resolve().relative_to(ROOT_DIR))
+    except Exception:
+        return str(path.resolve())
+
+
 @dataclass(slots=True)
 class Batch:
     features: torch.Tensor
@@ -154,6 +161,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--max-val-samples", type=int, default=0)
     parser.add_argument("--max-test-samples", type=int, default=0)
     parser.add_argument("--save-last", type=parse_bool, default=True)
+    parser.add_argument("--artifact-kind", type=str, default="runtime", help="dummy|validation|runtime")
+    parser.add_argument("--dataset-kind", type=str, default="unknown", help="synthetic_fixture|mini_validation|real_dataset|unknown")
+    parser.add_argument("--source-pipeline", type=str, default="train_pose_word_model", help="Marker for produced checkpoint lineage")
     return parser
 
 
@@ -363,6 +373,10 @@ def build_checkpoint(
             "clip_frames": int(clip_frames),
         },
         "dataset_flags": dataset_flags,
+        "artifact_kind": str(args.artifact_kind).strip() or "runtime",
+        "dataset_kind": str(args.dataset_kind).strip() or "unknown",
+        "trained": True,
+        "source_pipeline": str(args.source_pipeline).strip() or "train_pose_word_model",
         "train_args": {
             "epochs": int(args.epochs),
             "batch_size": int(args.batch_size),
@@ -528,8 +542,8 @@ def main() -> int:
     )
 
     summary = {
-        "dataset_index": str(dataset_index),
-        "dataset_root": str(dataset_root),
+        "dataset_index": _display_path(dataset_index),
+        "dataset_root": _display_path(dataset_root),
         "feature_dim": int(feature_dim),
         "clip_frames": int(args.clip_frames),
         "labels": labels,
@@ -539,6 +553,10 @@ def main() -> int:
         "weight_decay": float(args.weight_decay),
         "seed": int(args.seed),
         "device": str(device),
+        "artifact_kind": str(args.artifact_kind).strip() or "runtime",
+        "dataset_kind": str(args.dataset_kind).strip() or "unknown",
+        "trained": True,
+        "source_pipeline": str(args.source_pipeline).strip() or "train_pose_word_model",
         "model": {
             "conv_channels": int(args.conv_channels),
             "gru_hidden": int(args.gru_hidden),

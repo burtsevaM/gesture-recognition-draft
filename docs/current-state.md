@@ -250,6 +250,7 @@
 **Текущий статус**
 - Runtime-пайплайн реализован и health/readiness в коде предусмотрены.
 - Текущие локальные артефакты `pose_word_model.onnx` и `bio_segmenter.onnx` в рабочем дереве сгенерированы dummy/bootstrap-скриптами, что подтверждается полем `generated_by` в JSON-конфигах.
+- В репозитории появился отдельный reproducible technical validation path `backend/scripts/run_pose_words_validation.py`, который локально генерирует non-dummy validation artifacts в `backend/artifacts/validation/pose_words/`; детали зафиксированы в `docs/pose_words_technical_validation.md`.
 - Поэтому режим можно считать **экспериментальным**: pipeline и интеграция есть, но реальное качество pose-распознавания слов текущими локальными артефактами не подтверждено.
 
 **Замечания и ограничения**
@@ -518,9 +519,9 @@
 
 - Нет полноценного автоматического end-to-end теста с реальной камерой и реальными production-моделями.
 - Не подтверждена точность распознавания по тестам.
-- Нет CI-подтверждения, что все локальные артефакты воспроизводимы из нуля без ручных шагов кроме bootstrap dummy.
+- Нет CI-подтверждения, что все локальные артефакты воспроизводимы из нуля без ручных шагов; при этом локальный technical validation path для `pose_words` теперь есть и воспроизводим.
 - Для `words` training/export pipeline в репозитории не выглядит завершенным.
-- Для `pose_words` текущий smoke опирается на synthetic/dummy сценарии, а не на обученную модель.
+- Для `pose_words` direct runtime validation на обученных validation artifacts теперь подтвержден, но backend WebSocket smoke все еще опирается на mock frames и не доказывает положительное camera/video end-to-end распознавание.
 
 ### 9.4. Быстрая ручная проверка
 
@@ -544,7 +545,7 @@
   - runtime-логи и локальные артефакты.
 - В проекте одновременно существуют несколько параллельных путей распознавания слов (`words` и `pose_words`) с частичным пересечением ответственности.
 - Верхний `README.md`, `backend/README.md` и текущий конфиг уже фокусируются на разных центрах тяжести; единая “истина” по текущему основному сценарию отсутствует.
-- Для `pose_words` локальные артефакты являются dummy baseline. Это означает, что наличие working runtime не равно наличию реального рабочего pose-word recognition.
+- Для `pose_words` default runtime artifacts остаются dummy baseline, хотя рядом уже есть отдельный local validation path с non-dummy validation artifacts. Это означает, что наличие working runtime и наличие validation path не равны готовности заменить `words`.
 - RGB `words` runtime выглядит более “настоящим” по runtime-части, чем по training/export части: inference реализован, а training/export внутри репозитория остаются неполными.
 - Внутри `backend/data/slovo_repo/` хранится вложенный внешний git-репозиторий. Это осложняет переносимость и границы ответственности.
 - В репозитории уже находятся runtime-логи (`backend/artifacts/words_runtime.jsonl`) и локальные рабочие артефакты, что плохо для чистого основного репозитория.

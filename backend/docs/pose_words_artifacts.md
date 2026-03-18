@@ -63,3 +63,31 @@ python backend/train/make_dummy_bio_segmenter.py
 
 `make_dummy_*` создают минимальные baseline ONNX для восстановления пайплайна.  
 Качество распознавания у них нецелевое: они нужны для того, чтобы `pose_words` работал end-to-end без падения.
+
+## Отдельный technical validation path
+
+Для non-dummy технической валидации теперь есть отдельный reproducible runner:
+
+```bash
+source .venv/bin/activate
+python backend/scripts/run_pose_words_validation.py
+```
+
+Он не перезаписывает bootstrap baseline в `backend/artifacts/`, а генерирует отдельные локальные outputs:
+
+- `backend/data/pose_words_validation/generated/`
+- `backend/artifacts/validation/pose_words/`
+
+Внутри validation artifacts фиксируются metadata markers:
+
+- `artifact_kind: validation`
+- `dataset_kind: synthetic_fixture`
+- `trained: true`
+- `source_pipeline: run_pose_words_validation`
+
+Это нужно, чтобы не смешивать:
+
+- `dummy/bootstrap` artifacts для fallback и быстрого восстановления runtime;
+- `validation` artifacts для честного подтверждения train/export/runtime path.
+
+Подробный итог validation run описан в `docs/pose_words_technical_validation.md`.
