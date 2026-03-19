@@ -30,7 +30,7 @@
 
 | Gate | Краткое название | Текущий статус |
 | --- | --- | --- |
-| VG-01 | Реальные pose/BIO артефакты | частично выполнен |
+| VG-01 | Реальные pose/BIO артефакты | выполнен |
 | VG-02 | Воспроизводимый train/export/inference путь | выполнен |
 | VG-03 | Корректный runtime-запуск `pose_words` | выполнен |
 | VG-04 | Smoke/integration проверка рабочего контура | частично выполнен |
@@ -45,9 +45,9 @@
 - Что считается условием прохождения: в репозитории или в поддерживаемом внешнем артефактном хранилище существуют реальные артефакты для `pose_word` classifier и BIO segmenter; они не помечены как dummy/bootstrap; их происхождение, датасетный контекст и роль в runtime понятны.
 - Какие артефакты/доказательства должны существовать: актуальные `pose_word_model.onnx`, `pose_word_labels.txt`, `pose_word_config.json`, `bio_segmenter.onnx`, `bio_thresholds.json`, `bio_config.json`, а также метаданные training/export происхождения или отчет о происхождении артефактов.
 - Как проверяется gate: проверяются активные артефакты и их JSON-метаданные; в конфиге и документации не должно быть указаний, что runtime использует `make_dummy_*` или bootstrap baseline вместо реальных моделей.
-- Текущий статус по репозиторию: **частично выполнен**.
+- Текущий статус по репозиторию: **выполнен**.
 
-Основание: в репозитории появился воспроизводимый validation path `backend/scripts/run_pose_words_validation.py`, который реально обучает обе модели, экспортирует non-dummy ONNX-артефакты в `backend/artifacts/validation/pose_words/` и маркирует их как `artifact_kind: validation`, `dataset_kind: synthetic_fixture`, `trained: true`. Это подтверждено документом `docs/pose_words_technical_validation.md` и локальным validation report. При этом default runtime artifacts в `backend/artifacts/pose_word_config.json`, `backend/artifacts/bio_config.json` и `backend/artifacts/bio_thresholds.json` по-прежнему относятся к bootstrap/dummy baseline, поэтому gate нельзя считать полностью закрытым для решения о снятии `words`.
+Основание: в репозитории есть воспроизводимый validation path `backend/scripts/run_pose_words_validation.py`, который реально обучает обе модели и экспортирует non-dummy ONNX-артефакты в `backend/artifacts/validation/pose_words/`. Также появился официальный install/promote workflow `backend/scripts/install_pose_words_runtime_artifacts.py`, который валидирует metadata source artifacts, делает их active runtime set в `backend/artifacts/runtime/active/pose_words/` и пишет `backend/artifacts/runtime/active/pose_words/pose_words_active_manifest.json`. Фактический прогон зафиксирован в `docs/pose_words_technical_validation.md`: backend реально стартует на active non-dummy artifacts, а `/health` явно показывает `active_artifact_profile=validation_active`, `pose_words_artifact_kind=validation`, `bio_artifact_kind=validation`, `pose_words_non_dummy_active=true`. Dummy/bootstrap path сохраняется, но больше не является единственным active runtime path.
 
 ### VG-02. Воспроизводимый путь train/export/inference
 
@@ -151,8 +151,8 @@
 
 ### Краткий итог
 
-- Выполнены: `VG-02`, `VG-03`.
-- Частично выполнены: `VG-01`, `VG-04`, `VG-05`, `VG-08`.
+- Выполнены: `VG-01`, `VG-02`, `VG-03`.
+- Частично выполнены: `VG-04`, `VG-05`, `VG-08`.
 - Не выполнен: `VG-06`.
 - Требует ручной проверки: `VG-07`.
 
@@ -161,7 +161,6 @@
 По текущему состоянию репозитория `pose_words` подтвержден как архитектурное целевое направление, но не подтвержден как достаточная замена для снятия `words` с активной baseline-роли.
 
 Главные блокеры на данный момент:
-- default pose/BIO артефакты в рабочем дереве остаются dummy/bootstrap baseline, хотя отдельный validation path для non-dummy artifacts уже подтвержден;
 - положительное end-to-end распознавание через backend WebSocket на camera/video контуре не зафиксировано как пройденный reproducible smoke;
 - отсутствует оформленное baseline comparison `pose_words` против `words`;
 - стабильность на demo/integration контуре не зафиксирована как пройденная ручная валидация.

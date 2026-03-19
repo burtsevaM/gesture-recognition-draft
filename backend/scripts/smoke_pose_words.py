@@ -21,6 +21,8 @@ class HealthInfo:
     ok: bool
     mode: str
     segmentation_enabled: bool
+    non_dummy_active: bool
+    active_profile: str
     raw: dict[str, Any]
 
 
@@ -134,6 +136,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--health-timeout-sec", type=float, default=5.0)
     parser.add_argument("--require-pose-words", type=parse_bool, default=False)
     parser.add_argument("--require-segmentation", type=parse_bool, default=False)
+    parser.add_argument("--require-non-dummy-active", type=parse_bool, default=False)
     parser.add_argument("--log-path", type=Path, default=Path("backend/artifacts/smoke_pose_words.jsonl"))
     return parser
 
@@ -157,7 +160,14 @@ def load_health(base_url: str, timeout_sec: float) -> HealthInfo:
     cfg = data.get("config") if isinstance(data.get("config"), dict) else {}
     mode = str(cfg.get("recognition_mode", ""))
     segmentation_enabled = bool(cfg.get("segmentation_enabled", False))
-    return HealthInfo(ok=bool(data.get("ok", False)), mode=mode, segmentation_enabled=segmentation_enabled, raw=data)
+    return HealthInfo(
+        ok=bool(data.get("ok", False)),
+        mode=mode,
+        segmentation_enabled=segmentation_enabled,
+        non_dummy_active=bool(data.get("pose_words_non_dummy_active", False)),
+        active_profile=str(data.get("active_artifact_profile", "")),
+        raw=data,
+    )
 
 
 def parse_frame_summary(payload: dict[str, Any]) -> FrameSummary:
@@ -203,6 +213,8 @@ async def run_smoke(args: argparse.Namespace) -> int:
     print("[smoke] health ok:", health.ok)
     print("[smoke] mode:", health.mode)
     print("[smoke] segmentation.enabled:", health.segmentation_enabled)
+    print("[smoke] non_dummy_active:", health.non_dummy_active)
+    print("[smoke] active_profile:", health.active_profile)
     print("[smoke] ws_url:", ws_url)
 
     if bool(args.require_pose_words) and health.mode != "pose_words":
@@ -210,6 +222,9 @@ async def run_smoke(args: argparse.Namespace) -> int:
         return 2
     if bool(args.require_segmentation) and not health.segmentation_enabled:
         print("[smoke] fail: segmentation.enabled is false")
+        return 2
+    if bool(args.require_non_dummy_active) and not health.non_dummy_active:
+        print("[smoke] fail: active pose_words artifacts are not non-dummy")
         return 2
 
     log_path = Path(args.log_path)

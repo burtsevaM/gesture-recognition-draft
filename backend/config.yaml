@@ -83,8 +83,9 @@ runtime_log:
   path: backend/artifacts/words_runtime.jsonl
 segmentation:
   enabled: true
-  model_path: backend/artifacts/bio_segmenter.onnx
-  thresholds_path: backend/artifacts/bio_thresholds.json
+  model_path: backend/artifacts/runtime/active/pose_words/bio_segmenter.onnx
+  config_path: backend/artifacts/runtime/active/pose_words/bio_config.json
+  thresholds_path: backend/artifacts/runtime/active/pose_words/bio_thresholds.json
   window: 256
   step: 8
   min_len: 6
@@ -94,8 +95,9 @@ segmentation:
   max_buffer: 512
   ort_num_threads: 1
 pose_word_model:
-  path: backend/artifacts/pose_word_model.onnx
-  labels_path: backend/artifacts/pose_word_labels.txt
+  path: backend/artifacts/runtime/active/pose_words/pose_word_model.onnx
+  labels_path: backend/artifacts/runtime/active/pose_words/pose_word_labels.txt
+  config_path: backend/artifacts/runtime/active/pose_words/pose_word_config.json
   clip_frames: 32
   topk: 5
   ort_num_threads: 1

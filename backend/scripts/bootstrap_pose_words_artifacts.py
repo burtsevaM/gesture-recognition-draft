@@ -2,14 +2,18 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
+import json
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 
 ROOT_DIR = Path(__file__).resolve().parents[2]
 POSE_GENERATOR = ROOT_DIR / "backend" / "train" / "make_dummy_pose_word_model.py"
 BIO_GENERATOR = ROOT_DIR / "backend" / "train" / "make_dummy_bio_segmenter.py"
+MANIFEST_NAME = "pose_words_active_manifest.json"
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -21,7 +25,7 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--artifacts-dir",
         type=Path,
-        default=Path("backend/artifacts"),
+        default=Path("backend/artifacts/runtime/active/pose_words"),
         help="Artifacts directory for generated ONNX/config files",
     )
     return parser
@@ -56,6 +60,81 @@ def _artifact_map(artifacts_dir: Path) -> tuple[dict[str, Path], dict[str, Path]
         "bio_config.json": artifacts_dir / "bio_config.json",
     }
     return pose_artifacts, bio_artifacts
+
+
+def _repo_rel(path: Path) -> str:
+    try:
+        return str(path.resolve().relative_to(ROOT_DIR))
+    except Exception:
+        return str(path.resolve())
+
+
+def _load_json(path: Path) -> dict:
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(payload, dict):
+        raise ValueError(f"expected JSON object in {path}")
+    return payload
+
+
+def _sha256_short(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as f:
+        for chunk in iter(lambda: f.read(65536), b""):
+            digest.update(chunk)
+    return digest.hexdigest()[:16]
+
+
+def _profile_name(pose_kind: str, bio_kind: str) -> str:
+    if pose_kind == "dummy" or bio_kind == "dummy":
+        return "dummy_fallback"
+    if pose_kind == "validation" and bio_kind == "validation":
+        return "validation_active"
+    if pose_kind == "runtime" and bio_kind == "runtime":
+        return "runtime_active"
+    return "mixed_active"
+
+
+def _write_active_manifest(artifacts_dir: Path, pose_artifacts: dict[str, Path], bio_artifacts: dict[str, Path]) -> Path:
+    pose_cfg = _load_json(pose_artifacts["pose_word_config.json"])
+    bio_cfg = _load_json(bio_artifacts["bio_config.json"])
+    bio_thresholds = _load_json(bio_artifacts["bio_thresholds.json"])
+
+    pose_kind = str(pose_cfg.get("artifact_kind") or "unknown").strip().lower()
+    bio_kind = str(bio_cfg.get("artifact_kind") or bio_thresholds.get("artifact_kind") or "unknown").strip().lower()
+
+    manifest = {
+        "profile": _profile_name(pose_kind, bio_kind),
+        "installed_at_unix": float(time.time()),
+        "installed_by": "backend/scripts/bootstrap_pose_words_artifacts.py",
+        "source_dir": _repo_rel(artifacts_dir),
+        "target_dir": _repo_rel(artifacts_dir),
+        "backup_dir": "",
+        "pose_word": {
+            "artifact_kind": pose_kind,
+            "dataset_kind": str(pose_cfg.get("dataset_kind") or "unknown"),
+            "trained": bool(pose_cfg.get("trained", False)),
+            "source_pipeline": str(pose_cfg.get("source_pipeline") or ""),
+            "generated_by": str(pose_cfg.get("generated_by") or ""),
+            "active_model_path": _repo_rel(pose_artifacts["pose_word_model.onnx"]),
+            "active_labels_path": _repo_rel(pose_artifacts["pose_word_labels.txt"]),
+            "active_config_path": _repo_rel(pose_artifacts["pose_word_config.json"]),
+            "sha256_16": _sha256_short(pose_artifacts["pose_word_model.onnx"]),
+        },
+        "bio": {
+            "artifact_kind": bio_kind,
+            "dataset_kind": str(bio_cfg.get("dataset_kind") or bio_thresholds.get("dataset_kind") or "unknown"),
+            "trained": bool(bio_cfg.get("trained", bio_thresholds.get("trained", False))),
+            "source_pipeline": str(bio_cfg.get("source_pipeline") or bio_thresholds.get("source_pipeline") or ""),
+            "generated_by": str(bio_cfg.get("generated_by") or bio_thresholds.get("generated_by") or ""),
+            "active_model_path": _repo_rel(bio_artifacts["bio_segmenter.onnx"]),
+            "active_thresholds_path": _repo_rel(bio_artifacts["bio_thresholds.json"]),
+            "active_config_path": _repo_rel(bio_artifacts["bio_config.json"]),
+            "sha256_16": _sha256_short(bio_artifacts["bio_segmenter.onnx"]),
+        },
+    }
+    manifest_path = artifacts_dir / MANIFEST_NAME
+    manifest_path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
+    return manifest_path
 
 
 def main() -> int:
@@ -121,7 +200,9 @@ def main() -> int:
         missing_names = ", ".join(sorted(all_missing.keys()))
         raise RuntimeError(f"bootstrap finished with missing artifacts: {missing_names}")
 
+    manifest_path = _write_active_manifest(artifacts_dir, pose_artifacts, bio_artifacts)
     _print_status("final status", {**pose_artifacts, **bio_artifacts})
+    print(f"[bootstrap] active manifest: {manifest_path}")
     print("[bootstrap] pose_words artifacts are ready.")
     return 0
 

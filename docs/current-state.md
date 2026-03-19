@@ -231,12 +231,12 @@
 - Возврат `skeleton.raw`, `skeleton.norm`, `segments`, `bio`, `perf`.
 
 **Какие модели/файлы/конфиги использует**
-- `backend/artifacts/pose_word_model.onnx`
-- `backend/artifacts/pose_word_labels.txt`
-- `backend/artifacts/pose_word_config.json`
-- `backend/artifacts/bio_segmenter.onnx`
-- `backend/artifacts/bio_thresholds.json`
-- `backend/artifacts/bio_config.json`
+- `backend/artifacts/runtime/active/pose_words/pose_word_model.onnx`
+- `backend/artifacts/runtime/active/pose_words/pose_word_labels.txt`
+- `backend/artifacts/runtime/active/pose_words/pose_word_config.json`
+- `backend/artifacts/runtime/active/pose_words/bio_segmenter.onnx`
+- `backend/artifacts/runtime/active/pose_words/bio_thresholds.json`
+- `backend/artifacts/runtime/active/pose_words/bio_config.json`
 - `backend/config.yaml`
 
 **Какой результат выдает**
@@ -249,8 +249,8 @@
 
 **Текущий статус**
 - Runtime-пайплайн реализован и health/readiness в коде предусмотрены.
-- Текущие локальные артефакты `pose_word_model.onnx` и `bio_segmenter.onnx` в рабочем дереве сгенерированы dummy/bootstrap-скриптами, что подтверждается полем `generated_by` в JSON-конфигах.
 - В репозитории появился отдельный reproducible technical validation path `backend/scripts/run_pose_words_validation.py`, который локально генерирует non-dummy validation artifacts в `backend/artifacts/validation/pose_words/`; детали зафиксированы в `docs/pose_words_technical_validation.md`.
+- Для активного runtime теперь есть поддерживаемый install/promote workflow `backend/scripts/install_pose_words_runtime_artifacts.py`, который переводит validated artifacts в active set `backend/artifacts/runtime/active/pose_words/*` и делает это видимым через manifest и `/health`.
 - Поэтому режим можно считать **экспериментальным**: pipeline и интеграция есть, но реальное качество pose-распознавания слов текущими локальными артефактами не подтверждено.
 
 **Замечания и ограничения**
@@ -343,12 +343,12 @@
 - `backend/artifacts/words_runtime.jsonl`
 
 **Для `pose_words`**
-- `backend/artifacts/pose_word_model.onnx`
-- `backend/artifacts/pose_word_labels.txt`
-- `backend/artifacts/pose_word_config.json`
-- `backend/artifacts/bio_segmenter.onnx`
-- `backend/artifacts/bio_thresholds.json`
-- `backend/artifacts/bio_config.json`
+- `backend/artifacts/runtime/active/pose_words/pose_word_model.onnx`
+- `backend/artifacts/runtime/active/pose_words/pose_word_labels.txt`
+- `backend/artifacts/runtime/active/pose_words/pose_word_config.json`
+- `backend/artifacts/runtime/active/pose_words/bio_segmenter.onnx`
+- `backend/artifacts/runtime/active/pose_words/bio_thresholds.json`
+- `backend/artifacts/runtime/active/pose_words/bio_config.json`
 
 ### 6.2. Обязательные зависимости между кодом и артефактами
 
@@ -360,9 +360,9 @@
 
 ### 6.3. Что важно зафиксировать отдельно
 
-- `backend/artifacts/pose_word_config.json` содержит `generated_by: backend/train/make_dummy_pose_word_model.py`.
-- `backend/artifacts/bio_config.json` и `backend/artifacts/bio_thresholds.json` содержат `generated_by: backend/train/make_dummy_bio_segmenter.py`.
-- Следовательно, текущие pose/BIO артефакты в рабочем дереве — bootstrap baseline, а не подтвержденные production-модели.
+- Bootstrap/dummy path по-прежнему существует через `backend/scripts/bootstrap_pose_words_artifacts.py` и `backend/train/make_dummy_*`.
+- Одновременно с этим в репозитории теперь есть поддерживаемый active non-dummy runtime workflow через `backend/scripts/run_pose_words_validation.py` и `backend/scripts/install_pose_words_runtime_artifacts.py`.
+- Следовательно, bootstrap baseline больше не является единственным способом поднять active `pose_words` runtime, но и не должен трактоваться как production-модель.
 - Для `words` runtime в конфиге используется `slovo_word_model_mvit16-4.onnx`, но скрипт `backend/scripts/download_slovo_assets.sh` скачивает `slovo_word_model.onnx` (`mvit32-2.onnx`). Связь между этими двумя файлами требует ручной проверки.
 
 ### 6.4. Чего может не хватать на чистой машине
@@ -545,7 +545,7 @@
   - runtime-логи и локальные артефакты.
 - В проекте одновременно существуют несколько параллельных путей распознавания слов (`words` и `pose_words`) с частичным пересечением ответственности.
 - Верхний `README.md`, `backend/README.md` и текущий конфиг уже фокусируются на разных центрах тяжести; единая “истина” по текущему основному сценарию отсутствует.
-- Для `pose_words` default runtime artifacts остаются dummy baseline, хотя рядом уже есть отдельный local validation path с non-dummy validation artifacts. Это означает, что наличие working runtime и наличие validation path не равны готовности заменить `words`.
+- Для `pose_words` теперь существует supported active non-dummy runtime path, но это по-прежнему не равно готовности заменить `words`: validation path и install workflow подтверждают технику запуска, а не качество на целевом датасете.
 - RGB `words` runtime выглядит более “настоящим” по runtime-части, чем по training/export части: inference реализован, а training/export внутри репозитория остаются неполными.
 - Внутри `backend/data/slovo_repo/` хранится вложенный внешний git-репозиторий. Это осложняет переносимость и границы ответственности.
 - В репозитории уже находятся runtime-логи (`backend/artifacts/words_runtime.jsonl`) и локальные рабочие артефакты, что плохо для чистого основного репозитория.

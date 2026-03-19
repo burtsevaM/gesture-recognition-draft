@@ -56,6 +56,13 @@ VLM_EXECUTOR = ThreadPoolExecutor(max_workers=1, thread_name_prefix="vlm-judge")
 LOGGER = logging.getLogger(__name__)
 
 
+def repo_rel(path: Path) -> str:
+    try:
+        return str(path.resolve().relative_to(ROOT_DIR))
+    except Exception:
+        return str(path.resolve())
+
+
 class RuntimeContext:
     def __init__(self) -> None:
         self.lock = Lock()
@@ -116,6 +123,88 @@ class RuntimeContext:
             self._log_missing_artifact_once(artifact_path)
             missing.append(artifact_name)
         return missing
+
+    @staticmethod
+    def _load_json_metadata(path: Path) -> dict[str, Any]:
+        if not path.exists():
+            return {}
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except Exception:
+            return {}
+        return payload if isinstance(payload, dict) else {}
+
+    @staticmethod
+    def _artifact_profile_name(pose_kind: str, bio_kind: str) -> str:
+        if pose_kind == "dummy" or bio_kind == "dummy":
+            return "dummy_fallback"
+        if pose_kind == "validation" and bio_kind == "validation":
+            return "validation_active"
+        if pose_kind == "runtime" and bio_kind == "runtime":
+            return "runtime_active"
+        if pose_kind or bio_kind:
+            return "mixed_active"
+        return ""
+
+    def pose_words_artifact_state(self) -> dict[str, Any]:
+        cfg = self.config
+        empty = {
+            "active_artifact_profile": "",
+            "active_artifacts_manifest_path": "",
+            "active_artifacts_manifest_present": False,
+            "pose_words_artifact_kind": "",
+            "pose_words_artifact_dataset_kind": "",
+            "pose_words_artifact_source": "",
+            "pose_words_artifact_trained": False,
+            "bio_artifact_kind": "",
+            "bio_artifact_dataset_kind": "",
+            "bio_artifact_source": "",
+            "bio_artifact_trained": False,
+            "pose_words_non_dummy_active": False,
+        }
+        if cfg.recognition_mode != "pose_words" or not cfg.segmentation_enabled:
+            return empty
+
+        pose_cfg_path = self._resolve_runtime_path(cfg.pose_word_config_path)
+        bio_cfg_path = self._resolve_runtime_path(cfg.segmentation_config_path)
+        bio_thresholds_path = self._resolve_runtime_path(cfg.segmentation_thresholds_path)
+        manifest_path = pose_cfg_path.parent / "pose_words_active_manifest.json"
+
+        pose_cfg = self._load_json_metadata(pose_cfg_path)
+        bio_cfg = self._load_json_metadata(bio_cfg_path)
+        bio_thresholds = self._load_json_metadata(bio_thresholds_path)
+        manifest = self._load_json_metadata(manifest_path)
+
+        pose_kind = str(pose_cfg.get("artifact_kind") or "").strip().lower()
+        bio_kind = str(bio_cfg.get("artifact_kind") or bio_thresholds.get("artifact_kind") or "").strip().lower()
+        pose_trained = bool(pose_cfg.get("trained", False))
+        bio_trained = bool(bio_cfg.get("trained", bio_thresholds.get("trained", False)))
+        active_profile = str(manifest.get("profile") or "").strip()
+        if not active_profile:
+            active_profile = self._artifact_profile_name(pose_kind, bio_kind)
+
+        return {
+            "active_artifact_profile": active_profile,
+            "active_artifacts_manifest_path": repo_rel(manifest_path) if manifest_path.exists() else "",
+            "active_artifacts_manifest_present": bool(manifest_path.exists()),
+            "pose_words_artifact_kind": pose_kind,
+            "pose_words_artifact_dataset_kind": str(pose_cfg.get("dataset_kind") or ""),
+            "pose_words_artifact_source": str(pose_cfg.get("source_pipeline") or pose_cfg.get("generated_by") or ""),
+            "pose_words_artifact_trained": pose_trained,
+            "bio_artifact_kind": bio_kind,
+            "bio_artifact_dataset_kind": str(bio_cfg.get("dataset_kind") or bio_thresholds.get("dataset_kind") or ""),
+            "bio_artifact_source": str(
+                bio_cfg.get("source_pipeline")
+                or bio_thresholds.get("source_pipeline")
+                or bio_cfg.get("generated_by")
+                or bio_thresholds.get("generated_by")
+                or ""
+            ),
+            "bio_artifact_trained": bio_trained,
+            "pose_words_non_dummy_active": bool(
+                pose_kind not in {"", "dummy"} and bio_kind not in {"", "dummy"} and pose_trained and bio_trained
+            ),
+        }
 
     def get_hand_detector(self) -> HandDetector | None:
         with self.lock:
@@ -318,6 +407,20 @@ class RuntimeContext:
         pose_extractor_ready = False
         pose_words_ready = False
         runtime_ready = False
+        artifact_state = self.pose_words_artifact_state() if cfg.recognition_mode == "pose_words" else {
+            "active_artifact_profile": "",
+            "active_artifacts_manifest_path": "",
+            "active_artifacts_manifest_present": False,
+            "pose_words_artifact_kind": "",
+            "pose_words_artifact_dataset_kind": "",
+            "pose_words_artifact_source": "",
+            "pose_words_artifact_trained": False,
+            "bio_artifact_kind": "",
+            "bio_artifact_dataset_kind": "",
+            "bio_artifact_source": "",
+            "bio_artifact_trained": False,
+            "pose_words_non_dummy_active": False,
+        }
         if cfg.recognition_mode == "pose_words":
             hand_ready = False
             embed_ready = False
@@ -360,6 +463,7 @@ class RuntimeContext:
         return {
             "ok": True,
             "ready": bool(runtime_ready),
+            "pose_words_validated_runtime_ready": bool(pose_words_ready and artifact_state.get("pose_words_non_dummy_active", False)),
             "recognition_mode": cfg.recognition_mode,
             "config": cfg.to_dict(),
             "hand_detector_ready": hand_ready,
@@ -377,6 +481,7 @@ class RuntimeContext:
             "vlm_message": vlm_message,
             "allowed_labels": self.allowed_labels(),
             "errors": self.errors,
+            **artifact_state,
         }
 
 
