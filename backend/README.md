@@ -2,6 +2,8 @@
 
 Единый сценарий запуска `pose_words + segmentation` для локальной проверки.
 
+Общий статус репозитория как draft-контур и роли `letters` / `words` / `pose_words` описаны в `../README.md` и `../docs/*`. Этот документ ограничен backend runtime/runbook-сценарием.
+
 ## 1) Установка зависимостей
 
 ```bash

@@ -1,5 +1,7 @@
 # Pose Words Artifacts
 
+Этот документ описывает backend-специфичную работу с артефактами `pose_words`. Общий архитектурный контекст и статус репозитория как draft-контура вынесены в `../README.md` и `../../docs/*`.
+
 ## Обязательные файлы
 
 Для режима `recognition_mode: pose_words` + `segmentation.enabled: true` backend ожидает:

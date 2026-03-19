@@ -117,7 +117,7 @@
 - Как проверяется gate: проверяется, можно ли по документации понять назначение pipeline, required artifacts, сценарий запуска, базовые ограничения и критерии готовности без обращения к устным пояснениям.
 - Текущий статус по репозиторию: **частично выполнен**.
 
-Основание: в репозитории уже есть `docs/current-state.md`, `docs/target-architecture.md`, `docs/adr/ADR-001-pose-words-target.md`, `backend/README.md`, `backend/docs/pose_words_artifacts.md`, этот документ и новый `docs/pose_words_technical_validation.md`. Документация теперь явно разделяет bootstrap и validation path и описывает reproducible technical validation workflow. При этом сохраняются документальные пробелы и рассинхронизация: например, `docs/target-architecture.md` отдельно указывает на отсутствие выделенного contract document, а `backend/docs/pose_model_and_bio_plan.md` частично устарел относительно текущего train/export кода.
+Основание: в репозитории уже есть `README.md`, `docs/current-state.md`, `docs/target-architecture.md`, `docs/adr/ADR-001-pose-words-target.md`, `backend/README.md`, `backend/docs/pose_words_artifacts.md`, этот документ и `docs/pose_words_technical_validation.md`. Эти документы теперь согласованно описывают draft-статус репозитория, роли `letters` / `words` / `pose_words`, active non-dummy runtime path и сохранение bootstrap path как fallback. При этом gate остается частично выполненным, потому что явного версионируемого contract document по-прежнему нет, а часть локальных backend planning docs частично устарела относительно текущего train/export и runtime wiring.
 
 ## 5. Обязательные и вспомогательные gates
 

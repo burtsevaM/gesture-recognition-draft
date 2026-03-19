@@ -41,7 +41,7 @@
 При этом:
 - `letters` выглядит как локально завершенный MVP для букв;
 - `words` выглядит как более зрелый runtime для слов, чем его training/export часть;
-- `pose_words` архитектурно наиболее перспективен для дальнейшего развития, но в текущем рабочем дереве опирается на dummy pose/BIO артефакты.
+- `pose_words` архитектурно наиболее перспективен для дальнейшего развития; в текущем рабочем дереве для него уже подтверждены technical validation path и supported active non-dummy runtime path, но не закрыты quality/stability gates.
 
 ### 3.2. Рекомендуется сделать
 
@@ -116,6 +116,8 @@
 - датасетная сборка и черновые export-пайплайны;
 - вложенные внешние репозитории;
 - временные модели, dummy bootstrap, runtime logs, exploratory docs.
+
+Верхний `README.md` такого draft-репозитория должен явно отражать этот sandbox/migration context и направлять к специализированным runbook/architecture docs, а не описывать проект как уже стабилизированный продуктовый runtime.
 
 ### 4.3. Четкий вывод
 
@@ -531,7 +533,7 @@ experiments/   # опционально, минимально или отдел�
 - Финальный статус `words` RGB pipeline: нужен ли он как baseline в основном репозитории или только в draft.
 - Станет ли `letters` частью продукта или отдельным архивным baseline.
 - Нужен ли browser/client-side inference в основном контуре.
-- Когда `pose_words` получит не dummy, а реальную обученную модель и перестанет быть research-first runtime.
+- Когда `pose_words` пройдет не только technical validation на synthetic fixtures, но и более сильную quality/stability validation на целевом контуре и перестанет быть research-first runtime.
 
 ### Компромисс “быстро собрать рабочее” vs “сделать чисто”
 
